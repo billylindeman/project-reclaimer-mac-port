@@ -199,6 +199,12 @@ def run_relaying(cmd, stop_at_login=False, on_line=None):
 
 
 QR_EXPIRED = "The QR code expired before it was scanned. Press Try Again for a new one."
+# Steam ends a QR session after 1-2 minutes; finding the Steam app can take longer, so a new code just appears
+QR_ATTEMPTS = int(os.environ.get("RECLAIMER_QR_ATTEMPTS", 5))
+
+
+def qr_expired(rc, shown, tail):
+    return rc != 0 and shown and bool(tail) and "InitializeSteam" in tail[-1]
 
 
 def plain_reason(tail, default):
@@ -210,13 +216,13 @@ def login_qr():
     """QR sign-in, relaying each QR code DepotDownloader draws; saves the account name Steam reports."""
     cmd = [str(DEPOT), "-app", APP_ID, "-pubfile", CHECK_ITEM, "-manifest-only", "-qr", "-remember-password",
            "-dir", str(BASE / "logs" / "login-check")]
-    _, name, tail, shown = run_relaying(cmd, stop_at_login=True)
-    if name:
-        return f"ok {name}"
-    # nobody scanned in time: Steam ends the QR session after ~2 minutes ("InitializeSteam failed")
-    if shown and tail and "InitializeSteam" in tail[-1]:
-        return "error: " + QR_EXPIRED
-    return "error: " + plain_reason(tail, "sign-in did not finish")
+    for _ in range(QR_ATTEMPTS):
+        rc, name, tail, shown = run_relaying(cmd, stop_at_login=True)
+        if name:
+            return f"ok {name}"
+        if not qr_expired(rc, shown, tail):
+            return "error: " + plain_reason(tail, "sign-in did not finish")
+    return "error: " + QR_EXPIRED
 
 
 MCC_DEPOTS = ["976731", "976738", "976739"]  # MCC base, Halo 3, Halo 3 multiplayer (~35 GB)
@@ -246,10 +252,11 @@ def game_download(dest):
             return "ok"
         if not LOGIN_NEEDED.search("\n".join(tail)):
             return game_download_error(tail)
-    rc, _, tail, shown = run_relaying(base + ["-qr", "-remember-password"], on_line=progress)
-    if rc != 0 and shown and tail and "InitializeSteam" in tail[-1]:
-        return "error: " + QR_EXPIRED
-    return "ok" if rc == 0 else game_download_error(tail)
+    for _ in range(QR_ATTEMPTS):
+        rc, _, tail, shown = run_relaying(base + ["-qr", "-remember-password"], on_line=progress)
+        if not qr_expired(rc, shown, tail):
+            return "ok" if rc == 0 else game_download_error(tail)
+    return "error: " + QR_EXPIRED
 
 
 def game_download_error(tail):

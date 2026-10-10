@@ -201,8 +201,22 @@ class HelperTest(unittest.TestCase):
     def test_qr_code_expiring_is_said_plainly(self):
         # what DepotDownloader 3.4.0 prints when nobody scans for ~2 minutes
         self.fake([*QR, "", "The QR code has changed:", *QR, "Error: InitializeSteam failed"], rc=1)
-        self.assertEqual(self.run_helper("login-qr")[1][-1],
+        self.assertEqual(self.run_helper_env({"RECLAIMER_QR_ATTEMPTS": "2"}, "login-qr")[1][-1],
                          "error: The QR code expired before it was scanned. Press Try Again for a new one.")
+
+    def test_an_expired_qr_code_is_replaced_by_itself(self):
+        # finding the Steam app can take a while: a new code appears without pressing Try Again
+        self.depot_seq([([*QR, "Error: InitializeSteam failed"], 1),
+                        ([*QR, SUCCESS, "Got 1 licenses for account!"], 0)])
+        rc, out = self.run_helper("login-qr")
+        self.assertEqual(out[-1], "ok RealName_1", out)
+        self.assertEqual(out.count("qr-begin"), 2)
+
+    def test_game_download_replaces_an_expired_qr_code_by_itself(self):
+        self.depot_seq([([*QR, "Error: InitializeSteam failed"], 1),
+                        ([*QR, SUCCESS, "Got 1 licenses for account!", "100.00% halo3/halo3.dll"], 0)])
+        rc, out = self.run_helper("game-download", str(self.home / "mcc"))
+        self.assertEqual(out[-1], "ok", out)
 
     def test_qr_failure_without_explanation_says_so(self):
         self.fake([*QR], rc=1)

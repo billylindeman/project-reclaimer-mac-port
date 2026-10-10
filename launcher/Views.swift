@@ -80,7 +80,7 @@ struct SignInCard: View {
                 instruction(1, "Open the **Steam** app on your phone.")
                 instruction(2, "Tap the **shield** (Steam Guard) at the bottom.")
                 instruction(3, "Tap **Scan a QR code** and point your phone at this code.")
-                Text("This page moves on by itself once you approve.")
+                Text("This page moves on by itself once you approve. If the code runs out, a new one appears.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if let onSkip { Button("Skip for now", action: onSkip).buttonStyle(.link).font(.caption) }
             }
