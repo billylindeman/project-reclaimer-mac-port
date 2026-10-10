@@ -42,6 +42,16 @@ final class ToolsModel: ObservableObject {
         if running == nil { busy = nil; result = ("That tool couldn't start.", false) }
     }
 
+    func cancel() {
+        running?.stop()
+        repairQR = nil
+        repairProgress = nil
+        say("Stopped.", ok: false)
+    }
+
+    /// Only an exact "ok" (or "ok <detail>") is success: a tool that crashed or said nothing didn't work.
+    func succeeded(_ line: String) -> Bool { line == "ok" || line.hasPrefix("ok ") }
+
     func say(_ text: String, ok: Bool = true) { result = (text, ok) }
 
     func error(in line: String) -> String? { line.hasPrefix("error: ") ? String(line.dropFirst(7)) : nil }
@@ -76,8 +86,9 @@ final class ToolsModel: ObservableObject {
             repairQR = nil
             repairProgress = nil
             repairRemaining = nil
-            if let e = error(in: last) { say(e, ok: false) }
-            else { say("Halo 3's files are all there and match Steam.") }
+            if succeeded(last) { say("Halo 3's files are all there and match Steam.") }
+            else if busy == nil, result?.text == "Stopped." { }
+            else { say(error(in: last) ?? "Repair didn't finish. Try it again.", ok: false) }
         })
     }
 }
@@ -108,7 +119,16 @@ struct ToolsSheet: View {
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             if let busy = t.busy {
-                HStack(spacing: 10) { ProgressView().controlSize(.small); Text(busy).font(.callout) }
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text(busy).font(.callout)
+                    Spacer()
+                    Button("Stop") { t.cancel() }
+                }
+            }
+            if !launcher.update.finished {
+                Label("Tools are available once the update check finishes.", systemImage: "hourglass")
+                    .font(.callout).foregroundStyle(.secondary)
             }
             if let r = t.result {
                 Label(r.text, systemImage: r.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
@@ -120,9 +140,11 @@ struct ToolsSheet: View {
                     section("The game") {
                         tool("Force quit the game", "Force Quit",
                              "For a frozen game window that won't close, even with Force Quit.") {
-                            t.run("Stopping the game…", ["force-quit"]) { _ in
-                                launcher.gameForceQuit()
-                                t.say("The game was stopped.")
+                            t.run("Stopping the game…", ["force-quit"]) { last in
+                                if t.succeeded(last) {
+                                    launcher.gameForceQuit()
+                                    t.say("The game was stopped.")
+                                } else { t.say(t.error(in: last) ?? "The game couldn't be stopped. Restart your Mac to close it.", ok: false) }
                             }
                         }
                         tool("Repair game files", "Repair",
@@ -147,7 +169,7 @@ struct ToolsSheet: View {
                                 Text(mod.title).font(.callout).lineLimit(1)
                                 Spacer()
                                 Text(gigabytes(Double(mod.bytes))).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                                Button("Remove") { confirm = .removeMod(mod) }.disabled(t.busy != nil)
+                                Button("Remove") { confirm = .removeMod(mod) }.disabled(t.busy != nil || !launcher.update.finished)
                             }
                         }
                     }
@@ -165,7 +187,7 @@ struct ToolsSheet: View {
                         tool("Send a report", "Make Report",
                              "Puts the logs in a zip file on your Desktop to send to whoever set this up for you. It doesn't include your Steam account.") {
                             t.run("Making the report…", ["report"]) { last in
-                                if last.hasPrefix("ok ") {
+                                if t.succeeded(last), last.count > 3 {
                                     let url = URL(fileURLWithPath: String(last.dropFirst(3)))
                                     NSWorkspace.shared.activateFileViewerSelecting([url])
                                     t.say("The report is on your Desktop: \(url.lastPathComponent)")
@@ -186,7 +208,7 @@ struct ToolsSheet: View {
         }
         .padding(22)
         .frame(width: 480)
-        .disabled(t.busy != nil && t.repairQR == nil)
+
         .onAppear { if launcher.logging { t.loadMods() } }  // (not in --render-states snapshots)
         .alert(item: $confirm) { c in alert(for: c) }
     }
@@ -198,7 +220,8 @@ struct ToolsSheet: View {
                          message: Text("Frees \(gigabytes(Double(mod.bytes))). It downloads again if a server needs it."),
                          primaryButton: .destructive(Text("Remove")) {
                              t.run("Removing \(mod.title)…", ["remove-mod", mod.id]) { last in
-                                 if let e = t.error(in: last) { t.say(e, ok: false) } else { t.loadMods(); t.say("\(mod.title) was removed.") }
+                                 if t.succeeded(last) { t.loadMods(); t.say("\(mod.title) was removed.") }
+                                 else { t.say(t.error(in: last) ?? "\(mod.title) couldn't be removed.", ok: false) }
                              }
                          }, secondaryButton: .cancel())
         case .resetGraphics:
@@ -206,14 +229,16 @@ struct ToolsSheet: View {
                          message: Text("Your graphics settings are replaced; other settings stay."),
                          primaryButton: .default(Text("Restore")) {
                              t.run("Restoring graphics settings…", ["reset-graphics"]) { last in
-                                 t.say(t.error(in: last) ?? "Done. The game uses them the next time it starts.", ok: t.error(in: last) == nil)
+                                 if t.succeeded(last) { t.say("Done. The game uses them the next time it starts.") }
+                                 else { t.say(t.error(in: last) ?? "The graphics settings couldn't be changed.", ok: false) }
                              }
                          }, secondaryButton: .cancel())
         case .switchSteam:
             return Alert(title: Text("Use a different Steam account?"),
                          message: Text("A QR code appears in the main window: scan it with the Steam app of the account you want."),
                          primaryButton: .default(Text("Continue")) {
-                             t.run("Forgetting the Steam account…", ["forget-steam"]) { _ in
+                             t.run("Forgetting the Steam account…", ["forget-steam"]) { last in
+                                 guard t.succeeded(last) else { return t.say("The Steam account couldn't be changed.", ok: false) }
                                  dismiss()
                                  launcher.signIn()
                              }
@@ -223,10 +248,14 @@ struct ToolsSheet: View {
                          message: Text("This deletes Halo 3's files (about 35 GB), your downloaded mods and the app. The game closes if it's running, and macOS asks for your password to remove the network setting."),
                          primaryButton: .destructive(Text("Uninstall")) {
                              t.run("Uninstalling…", ["uninstall"]) { last in
-                                 if let e = t.error(in: last) { t.say(e, ok: false); return }
+                                 guard t.succeeded(last) else {
+                                     return t.say(t.error(in: last) ?? "Uninstalling didn't finish. Try it again.", ok: false)
+                                 }
                                  let done = NSAlert()
                                  done.messageText = "Project Reclaimer was removed."
-                                 done.informativeText = "Thanks for playing!"
+                                 done.informativeText = last == "ok network-kept"
+                                     ? "Its network setting stayed because the password box was cancelled. It's harmless and goes away if you reinstall and uninstall again."
+                                     : "Thanks for playing!"
                                  done.runModal()
                                  NSApp.terminate(nil)
                              }
@@ -253,6 +282,7 @@ struct ToolsSheet: View {
             }
             Spacer(minLength: 8)
             Button(button, role: role, action: action).controlSize(.large).fixedSize()
+                .disabled(t.busy != nil || !launcher.update.finished)  // one at a time, and never mid-update
         }
     }
 }

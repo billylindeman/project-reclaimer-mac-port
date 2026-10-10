@@ -27,7 +27,7 @@ let installedAppURL: URL = {
 @MainActor
 func openInstalledAppAndQuit() {
     let config = NSWorkspace.OpenConfiguration()
-    config.createsNewApplicationInstance = true
+    config.createsNewApplicationInstance = false  // (an installed app already open just comes to the front)
     NSWorkspace.shared.openApplication(at: installedAppURL, configuration: config) { _, _ in
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
@@ -123,6 +123,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var launcher: Launcher?
     var setup: SetupModel?
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Closing the window mid-install stops it: say so first (Try Again picks up where it stopped).
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            guard setup?.installing == true else { return .terminateNow }
+            let alert = NSAlert()
+            alert.messageText = "Stop installing?"
+            alert.informativeText = "You can carry on later: open Project Reclaimer again and it picks up where it stopped."
+            alert.addButton(withTitle: "Keep Installing")
+            alert.addButton(withTitle: "Stop")
+            return alert.runModal() == .alertSecondButtonReturn ? .terminateNow : .terminateCancel
+        }
+    }
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             launcher?.shutdown()

@@ -24,6 +24,9 @@ final class SetupModel: ObservableObject {
     @Published var progress: Double?
     @Published var remaining: String?
     @Published var qr: QRGrid?
+    @Published var status: String?   // e.g. "Signed in to Steam. Getting the file list…"
+    var installing: Bool { phase == .installing }
+    private var awake: NSObjectProtocol?
 
     private var estimator = RateEstimator()
     private var collector = QRCollector()
@@ -54,7 +57,10 @@ final class SetupModel: ObservableObject {
         var list: [Check] = []
         let v = ProcessInfo.processInfo.operatingSystemVersion
         list.append(Check(id: "mac", title: "Apple Silicon Mac, macOS \(v.majorVersion)", ok: true, detail: ""))
-        if !upgrading {
+        let halo = home.appendingPathComponent(
+            "prefix-wine/drive_c/Program Files (x86)/Steam/steamapps/common/Halo The Master Chief Collection/halo3/halo3.dll")
+        let copying = ProcessInfo.processInfo.environment["RECLAIMER_MCC_FROM"] != nil  // (install.sh skips it too)
+        if !upgrading, !copying, !FileManager.default.fileExists(atPath: halo.path) {  // (no big download left otherwise)
             let free = freeGigabytes()
             list.append(Check(id: "disk", title: "Free disk space: \(Int(free)) GB", ok: free >= Self.neededGB,
                               detail: free >= Self.neededGB ? "" :
@@ -75,10 +81,10 @@ final class SetupModel: ObservableObject {
         if phase == .ready, ProcessInfo.processInfo.environment["RECLAIMER_TEST_AUTOINSTALL"] == "1" { install() }
     }
 
+    /// Free space as `df` (and so install.sh) sees it, without space macOS could purge.
     private func freeGigabytes() -> Double {
-        let values = try? FileManager.default.homeDirectoryForCurrentUser
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return Double(values?.volumeAvailableCapacityForImportantUsage ?? 0) / 1e9
+        let values = try? FileManager.default.homeDirectoryForCurrentUser.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+        return Double(values?.volumeAvailableCapacity ?? 0) / 1e9
     }
 
     private func commandSucceeds(_ path: String, _ args: [String]) -> Bool {
@@ -92,10 +98,12 @@ final class SetupModel: ObservableObject {
         return p.terminationStatus == 0
     }
 
-    /// macOS's own "install developer tools" dialog; this window carries on by itself once they're there.
+    /// macOS's own "install developer tools" dialog; this window carries on by itself once they're there. If the
+    /// dialog was cancelled or the install failed, the button comes back.
     func installDevTools() {
         _ = commandSucceeds("/usr/bin/xcode-select", ["--install"])
         waitingForDevTools = true
+        let asked = Date()
         Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { return timer.invalidate() }
@@ -103,6 +111,10 @@ final class SetupModel: ObservableObject {
                     timer.invalidate()
                     self.waitingForDevTools = false
                     self.runChecks()
+                } else if Date().timeIntervalSince(asked) > 20,
+                          !self.commandSucceeds("/usr/bin/pgrep", ["-x", "Install Command Line Developer Tools"]) {
+                    timer.invalidate()  // Apple's installer isn't running any more: cancelled or failed
+                    self.waitingForDevTools = false
                 }
             }
         }
@@ -115,8 +127,13 @@ final class SetupModel: ObservableObject {
         progress = nil
         remaining = nil
         qr = nil
+        status = nil
         lastError = nil
         log("installing")
+        // a 35 GB download: the Mac must not fall asleep on it (the screen may)
+        awake = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .userInitiated],
+                                                      reason: "Installing Project Reclaimer")
+        setCloseButton(enabled: false)  // (Cmd-Q asks first; see AppDelegate)
         // the installer from GitHub, pinned to main's current commit so every file it fetches matches
         let bootstrap = """
             raw=${RECLAIMER_REPO_RAW:-}
@@ -126,10 +143,10 @@ final class SetupModel: ObservableObject {
               case "$sha" in *[!0-9a-f]*|'') sha=main ;; esac
               raw=https://raw.githubusercontent.com/mattromano/project-reclaimer-mac-port/$sha
             fi
-            t=$(mktemp -d)
-            /usr/bin/curl -fsSL --connect-timeout 20 "$raw/install.sh" -o "$t/install.sh" ||
+            f=${TMPDIR:-/tmp}/project-reclaimer-install.sh
+            /usr/bin/curl -fsSL --connect-timeout 20 --speed-limit 1024 --speed-time 60 "$raw/install.sh" -o "$f" ||
               { echo "error: Couldn't download the installer. Check your internet connection and try again."; exit 1; }
-            RECLAIMER_REPO_RAW="$raw" RECLAIMER_GUI=1 exec /bin/bash "$t/install.sh"
+            RECLAIMER_REPO_RAW="$raw" RECLAIMER_GUI=1 exec /bin/bash "$f"
             """
         installer = LineProcess("/bin/bash", ["-c", bootstrap], onLine: { [self] line in
             switch SetupEvent(line: line) {
@@ -138,30 +155,39 @@ final class SetupModel: ObservableObject {
                     steps.append(title)
                     progress = nil
                     remaining = nil
+                    status = nil
                     qr = nil
                     estimator = RateEstimator()
                 }
+            case .status(let s):
+                qr = nil  // (Steam accepted the scan)
+                status = s
             case .progress(let v):
                 qr = nil  // signed in: the download started
+                status = nil
                 progress = v
                 remaining = estimator.remaining(fraction: v)
             case .steam(let e):
                 collector.handle(e)
                 if e == .qrEnd { qr = collector.current }
             case .error(let e):
-                lastError = e
+                if lastError == nil { lastError = e }  // the first error is the specific one
             case .other:
                 break
             }
         }, onExit: { [self] status in
             installer = nil
             qr = nil
+            if let awake { ProcessInfo.processInfo.endActivity(awake) }
+            awake = nil
+            setCloseButton(enabled: true)
             log("installer exited \(status)\(lastError.map { ": \($0)" } ?? "")")
             if status == 0 {
                 phase = .done
                 // a disk image copy that was dragged somewhere would show up twice in Spotlight: the installed app
                 // in ~/Applications is the one that updates itself (a copy still on the disk image can't be moved)
-                if !isInstalledApp, !Bundle.main.bundlePath.hasPrefix("/Volumes/"),
+                if !isInstalledApp, Bundle.main.bundleIdentifier == "local.projectreclaimer.setup",
+                   Bundle.main.bundleURL.pathExtension == "app", !Bundle.main.bundlePath.hasPrefix("/Volumes/"),
                    Bundle.main.bundleURL.standardizedFileURL != installedAppURL.standardizedFileURL {
                     try? FileManager.default.trashItem(at: Bundle.main.bundleURL, resultingItemURL: nil)
                 }
@@ -174,6 +200,11 @@ final class SetupModel: ObservableObject {
     }
 
     func shutdown() { installer?.stop() }
+
+    /// Closing the window would quit mid-install before anything could ask; it waits until the install ends.
+    private func setCloseButton(enabled: Bool) {
+        for w in NSApp.windows { w.standardWindowButton(.closeButton)?.isEnabled = enabled }
+    }
 }
 
 struct SetupView: View {
@@ -218,8 +249,8 @@ struct SetupView: View {
                         if m.waitingForDevTools { ProgressView().controlSize(.small) }
                     }
                 }
-                if m.phase == .blocked, !m.needsDevTools {
-                    Button("Check Again") { m.runChecks() }
+                if m.phase == .blocked {
+                    Button("Check Again") { m.runChecks() }.disabled(m.waitingForDevTools)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -229,7 +260,7 @@ struct SetupView: View {
             Label {
                 Text(m.upgrading
                      ? "Keeps your Halo 3 files, mods and settings. Takes a minute or two, and macOS may ask for your Mac password."
-                     : "You'll need the **Steam app on your phone** (you scan a code with it, to download Halo 3 from your own account) and your **Mac password** once. The download is about 35 GB, so it can take a while: leave this window open.")
+                     : "You'll need the **Steam app on your phone** (you scan a code with it, to download Halo 3 from your own account) and your **Mac password**. The download is about 35 GB, so it can take a while: leave this window open (your Mac won't go to sleep meanwhile).")
                     .font(.callout).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } icon: { Image(systemName: "info.circle.fill").foregroundStyle(accent) }
@@ -261,6 +292,7 @@ struct SetupView: View {
                         .font(.title3).frame(width: 22, height: 22)
                         VStack(alignment: .leading, spacing: 6) {
                             Text(title).font(current ? .headline : .body)
+                            if current, let s = m.status { Text(s).font(.callout).foregroundStyle(.secondary) }
                             if current, let p = m.progress {
                                 ProgressView(value: p).tint(accent)
                                 Text("\(Int(p * 100))%" + (m.remaining.map { " · \($0)" } ?? ""))

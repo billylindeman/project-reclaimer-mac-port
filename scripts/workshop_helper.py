@@ -154,11 +154,12 @@ def login_check():
 
 def run_relaying(cmd, stop_at_login=False, on_line=None):
     """Run DepotDownloader, relaying each QR code it draws ("qr-begin", "qr: <row>"..., "qr-end") and saving the
-    account name Steam reports at QR sign-in. Returns (returncode, account name or None, last output lines).
+    account name Steam reports at QR sign-in. Returns (returncode, account name or None, last output lines,
+    whether a QR code was shown).
     stop_at_login: stop once signed in (login-qr). on_line(line) sees every other output line."""
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     stop_with_parent(p)
-    qr, name, tail = None, None, []  # qr: rows of the code being relayed, None outside a code
+    qr, name, tail, shown = None, None, [], False  # qr: rows of the code being relayed, None outside a code
     try:
         for raw in p.stdout:
             line = raw.rstrip("\n")
@@ -166,7 +167,7 @@ def run_relaying(cmd, stop_at_login=False, on_line=None):
             # so it ends after as many rows as it has modules: DepotDownloader then prints nothing until the scan
             if line and set(line) <= {"█", " "}:
                 if qr is None:
-                    qr = []
+                    qr, shown = [], True
                     print("qr-begin", flush=True)
                 qr.append(line)
                 print("qr: " + line, flush=True)
@@ -194,7 +195,10 @@ def run_relaying(cmd, stop_at_login=False, on_line=None):
     finally:
         if p.poll() is None:
             p.kill()
-    return p.returncode, name, tail
+    return p.returncode, name, tail, shown
+
+
+QR_EXPIRED = "The QR code expired before it was scanned. Press Try Again for a new one."
 
 
 def plain_reason(tail, default):
@@ -206,8 +210,13 @@ def login_qr():
     """QR sign-in, relaying each QR code DepotDownloader draws; saves the account name Steam reports."""
     cmd = [str(DEPOT), "-app", APP_ID, "-pubfile", CHECK_ITEM, "-manifest-only", "-qr", "-remember-password",
            "-dir", str(BASE / "logs" / "login-check")]
-    _, name, tail = run_relaying(cmd, stop_at_login=True)
-    return f"ok {name}" if name else "error: " + plain_reason(tail, "sign-in did not finish")
+    _, name, tail, shown = run_relaying(cmd, stop_at_login=True)
+    if name:
+        return f"ok {name}"
+    # nobody scanned in time: Steam ends the QR session after ~2 minutes ("InitializeSteam failed")
+    if shown and tail and "InitializeSteam" in tail[-1]:
+        return "error: " + QR_EXPIRED
+    return "error: " + plain_reason(tail, "sign-in did not finish")
 
 
 MCC_DEPOTS = ["976731", "976738", "976739"]  # MCC base, Halo 3, Halo 3 multiplayer (~35 GB)
@@ -219,9 +228,12 @@ def game_download(dest):
     window: QR codes and "progress: <percent>" lines, then "ok" or "error: <plain reason>"."""
     Path(dest).mkdir(parents=True, exist_ok=True)
     base = [str(DEPOT), "-app", APP_ID, "-depot", *MCC_DEPOTS, "-os", "windows", "-dir", str(dest), "-validate"]
-    last = [0.0]
+    last, signed_in = [0.0], [False]
 
     def progress(line):
+        if not signed_in[0] and (QR_SUCCESS.search(line) or re.match(r"Got \d+ licenses", line)):
+            signed_in[0] = True  # (the window takes the QR code away)
+            print("status: Signed in to Steam. Getting the file list…", flush=True)
         m = PROGRESS.match(line)
         if m and time.time() - last[0] >= 1:
             print(f"progress: {min(float(m.group(1)), 100.0):.1f}", flush=True)
@@ -229,12 +241,14 @@ def game_download(dest):
 
     name = account()
     if name:  # the saved login first; a QR code only when it no longer works
-        rc, _, tail = run_relaying(base + ["-username", name, "-remember-password"], on_line=progress)
+        rc, _, tail, _ = run_relaying(base + ["-username", name, "-remember-password"], on_line=progress)
         if rc == 0:
             return "ok"
         if not LOGIN_NEEDED.search("\n".join(tail)):
             return game_download_error(tail)
-    rc, _, tail = run_relaying(base + ["-qr", "-remember-password"], on_line=progress)
+    rc, _, tail, shown = run_relaying(base + ["-qr", "-remember-password"], on_line=progress)
+    if rc != 0 and shown and tail and "InitializeSteam" in tail[-1]:
+        return "error: " + QR_EXPIRED
     return "ok" if rc == 0 else game_download_error(tail)
 
 

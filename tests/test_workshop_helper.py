@@ -198,6 +198,12 @@ class HelperTest(unittest.TestCase):
         self.assertIn("Expired", out[-1])
         self.assertEqual((self.home / "steam-account").read_text().strip(), "RealName_1")
 
+    def test_qr_code_expiring_is_said_plainly(self):
+        # what DepotDownloader 3.4.0 prints when nobody scans for ~2 minutes
+        self.fake([*QR, "", "The QR code has changed:", *QR, "Error: InitializeSteam failed"], rc=1)
+        self.assertEqual(self.run_helper("login-qr")[1][-1],
+                         "error: The QR code expired before it was scanned. Press Try Again for a new one.")
+
     def test_qr_failure_without_explanation_says_so(self):
         self.fake([*QR], rc=1)
         self.assertEqual(self.run_helper("login-qr")[1][-1], "error: sign-in did not finish")
@@ -370,6 +376,10 @@ class HelperTest(unittest.TestCase):
         self.assertTrue(any(l.startswith("progress: ") for l in out), out)
         self.assertEqual(out[-1], "ok")
         self.assertEqual((self.home / "steam-account").read_text().strip(), "RealName_1")  # mods won't ask again
+        # the window takes the code away as soon as Steam accepts the scan, before the first progress line
+        signed = out.index("status: Signed in to Steam. Getting the file list…")
+        self.assertLess(out.index("qr-end"), signed)
+        self.assertLess(signed, next(i for i, l in enumerate(out) if l.startswith("progress: ")))
         run = self.depot_runs()[0]
         for a in ["-qr", "-validate", "-remember-password", "976731", "976738", "976739", str(dest)]:
             self.assertIn(a, run)

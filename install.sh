@@ -29,17 +29,19 @@ MOLTENVK_PKG="MoltenVK-macos-1.4.2.tar|https://github.com/KhronosGroup/MoltenVK/
 MESA_PKG="mesa3d-26.2.4-release-msvc.7z|https://github.com/pal1000/mesa-dist-win/releases/download/26.2.4/mesa3d-26.2.4-release-msvc.7z|351fc8c8b695878ffb3eaa044b3ead08672a48b1a045e3c3e3975811df0f6695"
 DEPOT_PKG="DepotDownloader-macos-arm64.zip|https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-macos-arm64.zip|60e80c7c496f3f9a079cd3c62036b35d088c27bc0149baf38f009eb57a52f6a5"
 SPINFIX_SHA=0ec56a555b7b420c381f7cf5010719c86c3626c3c99efcb376981089f5d4f847  # spinfix/d3d11.dll (built from spinfix/spinfix.c)
-LAUNCHER_SHA=60a9026dac7f53cd09bee0e4ebb46550caeee1f6bdef5d67be403a7fe6a1d80d  # launcher/ProjectReclaimer (built by scripts/make_launcher.sh)
+LAUNCHER_SHA=f45ced82dd5b10fc38a13faf93e479e00fae7b005e835a50984ad4f12ddcc9c5  # launcher/ProjectReclaimer (built by scripts/make_launcher.sh)
 UPDATE=${RECLAIMER_UPDATE:-}
 GUI=${RECLAIMER_GUI:-}
 # give up on a stalled connection instead of hanging (the launcher waits for this when updating)
 CURL_LIMITS="--connect-timeout 20 --speed-limit 1024 --speed-time 60"
 
-bold() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
+exec 3>&1  # the real output, for error lines from inside $(...) (the window reads them)
+STEP=starting
+bold() { STEP=$*; printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
 die() {
   printf '\n\033[31mError: %s\033[0m\n' "$*" >&2
-  [ -n "$GUI" ] && printf 'error: %s\n' "$*"  # (the window shows this line)
+  [ -n "$GUI" ] && printf 'error: %s\n' "$*" >&3  # (the window shows this line)
   exit 1
 }
 
@@ -47,10 +49,12 @@ fetch() {  # fetch "name|url|sha256" -> path of the verified file in $CACHE
   local name=${1%%|*} rest=${1#*|}; local url=${rest%%|*} sum=${rest##*|} f="$CACHE/${1%%|*}"
   if [ ! -f "$f" ] || [ "$(shasum -a 256 "$f" | cut -d' ' -f1)" != "$sum" ]; then
     note "downloading $name" >&2
-    curl -fL $CURL_LIMITS --progress-bar -o "$f.part" "$url" || die "download failed: $url"
+    curl -fL $CURL_LIMITS --progress-bar -o "$f.part" "$url" ||
+      die "Couldn't download $name. Check your internet connection and try again."
     mv "$f.part" "$f"
   fi
-  [ "$(shasum -a 256 "$f" | cut -d' ' -f1)" = "$sum" ] || die "checksum mismatch for $name"
+  [ "$(shasum -a 256 "$f" | cut -d' ' -f1)" = "$sum" ] ||
+    { rm -f "$f"; die "The download of $name was damaged. Press Try Again to download it again."; }
   printf '%s' "$f"
 }
 
@@ -59,10 +63,11 @@ script_file() {  # copy a file from this repo (local checkout or GitHub) to $2
   if [ -n "$here" ] && [ -f "$here/$1" ]; then cp "$here/$1" "$2"; else curl -fsSL $CURL_LIMITS "$REPO_RAW/$1" -o "$2"; fi
 }
 
-as_admin() {  # as_admin "<shell command>": sudo in Terminal; macOS's password dialog when run by the launcher
+as_admin() {  # as_admin "<shell command>" "<why>": sudo in Terminal; macOS's password dialog when run by the launcher
   if [ -n "$UPDATE" ] || [ -n "$GUI" ]; then
     local cmd=${1//\\/\\\\}; cmd=${cmd//\"/\\\"}
-    /usr/bin/osascript -e "do shell script \"$cmd\" with prompt \"Project Reclaimer is updating its network settings.\" with administrator privileges" >/dev/null
+    local why=${2:-Project Reclaimer is changing a system setting.}
+    /usr/bin/osascript -e "do shell script \"$cmd\" with prompt \"$why\" with administrator privileges" >/dev/null
   else
     sudo /bin/sh -c "$1" </dev/tty
   fi
@@ -93,11 +98,19 @@ FREE_GB=$(df -g "$HOME" | awk 'NR==2 {print $4}')
 [ "$FREE_GB" -ge 45 ] || [ -n "${RECLAIMER_MCC_FROM:-}" ] || [ -n "$UPDATE" ] ||
   [ -f "$BASE/prefix-wine/$MCC_REL/halo3/halo3.dll" ] || die "Need about 45 GB free disk space (have ${FREE_GB} GB)."
 mkdir -p "$BASE"/{game,tools,logs} "$CACHE"
+if [ -n "$GUI" ]; then
+  # anything failing without its own message still tells the window which step it was
+  trap 'printf "error: Something went wrong at the step “%s”. Check your internet connection and disk space, then press Try Again.\n" "$STEP" >&3' ERR
+  # a first install in progress: if it stops, the window offers Setup again (not the 1.0 Upgrade)
+  [ -f "$BASE/version" ] || [ -f "$BASE/prefix-wine/$MCC_REL/halo3/halo3.dll" ] || touch "$BASE/.setup-incomplete"
+fi
 
 if ! /usr/bin/pgrep -q oahd; then
   bold "Installing Rosetta 2 (runs Intel Windows code on Apple Silicon)"
   if [ -n "$GUI" ]; then
-    as_admin "softwareupdate --install-rosetta --agree-to-license" || die "Rosetta (Apple's Intel translator) didn't install."
+    as_admin "softwareupdate --install-rosetta --agree-to-license" \
+      "Project Reclaimer needs Rosetta, Apple's translator for Intel apps." ||
+      die "Rosetta (Apple's Intel translator) didn't install. If you cancelled the password box, press Try Again."
   else
     softwareupdate --install-rosetta --agree-to-license || die "Rosetta install failed."
   fi
@@ -147,7 +160,8 @@ ls "$BASE"/game/project-reclaimer-v*.exe >/dev/null 2>&1 ||
 bold "Windows environment for the Wine version"
 WINE_BIN="$BASE/wine/Wine Staging.app/Contents/Resources/wine/bin"
 if [ ! -f "$BASE/prefix-wine/system.reg" ]; then
-  WINEPREFIX="$BASE/prefix-wine" WINEDEBUG=-all "$WINE_BIN/wine" wineboot -i >/dev/null 2>&1 || true
+  # (mscoree/mshtml off: no Wine Mono/Gecko install dialogs; the game doesn't use them)
+  WINEPREFIX="$BASE/prefix-wine" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml=" "$WINE_BIN/wine" wineboot -i >/dev/null 2>&1 || true
   WINEPREFIX="$BASE/prefix-wine" WINEDEBUG=-all "$WINE_BIN/wineserver" -w
 fi
 unlink_documents "$BASE/prefix-wine"
@@ -213,8 +227,9 @@ if ! cmp -s "$T/reclaimer-loopback.sh" "$LB_DIR/reclaimer-loopback.sh" ||
     install -o root -g wheel -m 755 '$T/reclaimer-loopback.sh' '$LB_DIR/reclaimer-loopback.sh' &&
     install -o root -g wheel -m 644 '$T/local.projectreclaimer.loopback.plist' /Library/LaunchDaemons/local.projectreclaimer.loopback.plist &&
     { launchctl bootout system/local.projectreclaimer.loopback 2>/dev/null; true; } &&
-    launchctl bootstrap system /Library/LaunchDaemons/local.projectreclaimer.loopback.plist" ||
-    die "Could not install the network startup task."
+    launchctl bootstrap system /Library/LaunchDaemons/local.projectreclaimer.loopback.plist" \
+    "Project Reclaimer is setting up the local network addresses the game needs." ||
+    die "The network setting wasn't installed (the password box was cancelled or refused). Press Try Again."
 fi
 rm -rf "$T"
 note "ok"
@@ -242,6 +257,7 @@ else script_file VERSION "$CACHE/VERSION"; fi
 rm -rf "$CACHE/x64" "$CACHE/dxvk-macOS-async-v1.10.3-20230507-repack" "$CACHE/MoltenVK" "$CACHE/spinfix-d3d11.dll"
 # last: the launcher compares this with GitHub's VERSION, so a failed update is tried again next launch
 mv "$CACHE/VERSION" "$BASE/version"
+rm -f "$BASE/.setup-incomplete"
 # the downloaded archives (~1 GB) aren't needed any more, unless they're a cache the caller asked to keep
 [ -z "${RECLAIMER_CACHE:-}" ] && rm -rf "$CACHE"
 [ -n "$UPDATE" ] && { bold "Updated to $(cat "$BASE/version")"; exit 0; }

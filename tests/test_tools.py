@@ -34,7 +34,10 @@ class ToolsTest(unittest.TestCase):
         (self.apps / "Project Reclaimer.app" / "Contents").mkdir(parents=True)
         self.desktop = self.tmp / "Desktop"
         self.desktop.mkdir()
+        self.daemon = self.tmp / "local.projectreclaimer.loopback.plist"  # stands in for /Library/LaunchDaemons/…
+        self.daemon.write_text("<plist/>")
         self.env = dict(os.environ, RECLAIMER_HOME=str(self.home), RECLAIMER_TOOLS_DRYRUN="1",
+                        RECLAIMER_TEST_DAEMON_PLIST=str(self.daemon),
                         RECLAIMER_APPS_DIR=str(self.apps), RECLAIMER_DESKTOP=str(self.desktop),
                         RECLAIMER_GAME_PROCESS=r"project-reclaimer-v9\.9\.99\.exe game-client")
 
@@ -73,8 +76,10 @@ class ToolsTest(unittest.TestCase):
             self.assertEqual(t.net_check(), "missing")
 
     def test_expected_aliases_come_from_the_installed_loopback_script(self):
+        script = self.home / "game" / "reclaimer-loopback.sh"
+        script.write_text(script.read_text().replace("127.3.1; do", "127.3.1 127.0.9; do"))  # a range a release adds
         t = self.load()
-        for prefix in ("127.0.0.", "127.0.1.", "127.0.2.", "127.3.1."):
+        for prefix in ("127.0.0.", "127.0.1.", "127.0.2.", "127.3.1.", "127.0.9."):
             self.assertTrue(any(a.startswith(prefix) for a in t.EXPECTED_ALIASES), prefix)
 
     def test_net_fix_reinstalls_and_restarts_the_startup_task_with_one_password_prompt(self):
@@ -83,6 +88,8 @@ class ToolsTest(unittest.TestCase):
         admin = [l for l in out if l.startswith("dry-run admin: ")]
         self.assertEqual(len(admin), 1, out)
         cmd = admin[0]
+        self.assertEqual(subprocess.run(["/bin/sh", "-n", "-c", cmd[len("dry-run admin: "):]]).returncode, 0,
+                         "not valid shell")  # ("/Library/Application Support" has a space)
         self.assertIn("/Library/LaunchDaemons/local.projectreclaimer.loopback.plist", cmd)
         self.assertIn("launchctl bootstrap system", cmd)
         self.assertIn("reclaimer-loopback.sh", cmd)
@@ -187,6 +194,39 @@ class ToolsTest(unittest.TestCase):
                 game.kill()
         self.assertIsNotNone(game.poll())
 
+    def test_force_quit_works_when_wineserver_hangs(self):
+        # a frozen game often means a stuck wineserver: Force Quit must still stop the game, and not hang
+        ws = self.home / "wine/Wine Staging.app/Contents/Resources/wine/bin/wineserver"
+        ws.parent.mkdir(parents=True)
+        ws.write_text("#!/bin/sh\nsleep 120\n")
+        ws.chmod(0o755)
+        game = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                                 "project-reclaimer-v9.9.99.exe game-client"])
+        try:
+            rc, out = self.run_tool("force-quit")
+            self.assertEqual(out[-1], "ok", out)
+            game.wait(timeout=5)
+        finally:
+            if game.poll() is None:
+                game.kill()
+            subprocess.run(["pkill", "-f", str(ws)])
+
+    def test_uninstall_without_the_network_task_asks_for_no_password(self):
+        self.daemon.unlink()
+        rc, out = self.run_tool("uninstall")
+        self.assertEqual(out[-1], "ok")
+        self.assertFalse([l for l in out if l.startswith("dry-run admin: ")])
+
+    def test_uninstall_says_so_when_the_password_box_was_cancelled(self):
+        rc, out = self.run_tool("uninstall", RECLAIMER_TOOLS_DRYRUN="cancel")
+        self.assertEqual(out[-1], "ok network-kept")
+        self.assertFalse(self.home.exists())
+
+    def test_uninstall_also_removes_the_old_metal_app(self):
+        (self.apps / "Project Reclaimer Metal.app").mkdir()
+        self.run_tool("uninstall")
+        self.assertFalse((self.apps / "Project Reclaimer Metal.app").exists())
+
     def test_uninstall_removes_app_and_install_and_asks_once_for_the_network_task(self):
         rc, out = self.run_tool("uninstall")
         self.assertEqual(out[-1], "ok", out)
@@ -195,6 +235,16 @@ class ToolsTest(unittest.TestCase):
         admin = [l for l in out if l.startswith("dry-run admin: ")]
         self.assertEqual(len(admin), 1)
         self.assertIn("launchctl bootout system/local.projectreclaimer.loopback", admin[0])
+
+    def test_uninstall_only_stops_this_installs_helpers(self):
+        # e.g. another install's QR sign-in: the reviewer's test run once killed a live sign-in this way
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)",
+                                  "/elsewhere/game/workshop_helper.py", "login-qr"])
+        try:
+            self.run_tool("uninstall")
+            self.assertIsNone(other.poll(), "uninstall stopped another install's helper")
+        finally:
+            other.kill()
 
     def test_uninstall_removes_the_app_the_player_opened(self):
         moved = self.tmp / "Elsewhere" / "Project Reclaimer.app"

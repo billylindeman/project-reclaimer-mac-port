@@ -149,20 +149,28 @@ func launchMode(home: URL, isInstalledApp: Bool, installedAppExists: Bool) -> La
     let game = home.appendingPathComponent("game").path
     let wine = home.appendingPathComponent("wine").path
     guard fm.fileExists(atPath: game), fm.fileExists(atPath: wine) else { return .setup }
-    if !fm.fileExists(atPath: home.appendingPathComponent("version").path) { return .upgrade }
+    if !fm.fileExists(atPath: home.appendingPathComponent("version").path) {
+        // a 1.0 install has its game files and no version file; a first install that stopped partway (window
+        // closed, Mac restarted) left a marker, and carries on as Setup instead of a "one-time upgrade"
+        let mcc = "prefix-wine/drive_c/Program Files (x86)/Steam/steamapps/common/Halo The Master Chief Collection"
+        let halo = home.appendingPathComponent(mcc + "/halo3/halo3.dll").path
+        let incomplete = home.appendingPathComponent(".setup-incomplete").path
+        return fm.fileExists(atPath: halo) && !fm.fileExists(atPath: incomplete) ? .upgrade : .setup
+    }
     if !isInstalledApp, installedAppExists { return .handOff }
     return .launcher
 }
 
 /// One line of install.sh output in GUI mode.
 enum SetupEvent: Equatable {
-    case step(String), progress(Double), error(String), steam(SteamEvent), other
+    case step(String), progress(Double), status(String), error(String), steam(SteamEvent), other
 
     init(line: String) {
         let plain = line.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
         if plain.hasPrefix("==> ") { self = .step(String(plain.dropFirst(4))) }
         else if plain.hasPrefix("progress: "), let v = Double(plain.dropFirst(10)) { self = .progress(min(max(v, 0), 100) / 100) }
         else if plain.hasPrefix("error: ") { self = .error(String(plain.dropFirst(7))) }
+        else if plain.hasPrefix("status: ") { self = .status(String(plain.dropFirst(8))) }
         else if plain == "qr-begin" || plain == "qr-end" || plain.hasPrefix("qr: ") { self = .steam(SteamEvent(line: plain)) }
         else { self = .other }
     }

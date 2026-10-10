@@ -41,8 +41,9 @@ DESKTOP = Path(os.environ.get("RECLAIMER_DESKTOP", HOME / "Desktop"))
 GAME_PROCESS = os.environ.get("RECLAIMER_GAME_PROCESS", r"project-reclaimer-v[0-9.]+\.exe game-client")
 DAEMON = "local.projectreclaimer.loopback"
 DAEMON_PLIST = f"/Library/LaunchDaemons/{DAEMON}.plist"
+INSTALLED_PLIST = Path(os.environ.get("RECLAIMER_TEST_DAEMON_PLIST", DAEMON_PLIST))  # (tests point it elsewhere)
 DAEMON_DIR = "/Library/Application Support/ProjectReclaimer"
-DRYRUN = bool(os.environ.get("RECLAIMER_TOOLS_DRYRUN"))
+DRYRUN = os.environ.get("RECLAIMER_TOOLS_DRYRUN", "")  # "1": print admin commands; "cancel": as if cancelled
 
 
 def loopback_prefixes():
@@ -69,7 +70,7 @@ def as_admin(command, prompt):
     """Run a shell command as root behind macOS's own password dialog."""
     if DRYRUN:
         say("dry-run admin: " + command)
-        return True
+        return DRYRUN != "cancel"
     script = 'do shell script {} with prompt {} with administrator privileges'.format(
         json.dumps(command), json.dumps(prompt))
     return subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True).returncode == 0
@@ -117,7 +118,7 @@ def net_fix():
         return "error: The network setup wasn't fixed (the password box was cancelled)."
     if DRYRUN:
         return "ok"
-    for _ in range(10):  # the task adds ~1,300 addresses; give it a moment
+    for _ in range(20):  # the task adds ~1,300 addresses; give it a moment
         if net_check() == "ok":
             return "ok"
         time.sleep(1)
@@ -148,13 +149,21 @@ def crash_check():
 
 
 def force_quit():
+    # the game first, by force: a frozen game often comes with a stuck wineserver, which must not stop this
+    subprocess.run(["pkill", "-9", "-a", "-f", GAME_PROCESS], capture_output=True)
     env = dict(os.environ, WINEPREFIX=str(BASE / "prefix-wine"))
     wineserver = BASE / "wine" / "Wine Staging.app" / "Contents" / "Resources" / "wine" / "bin" / "wineserver"
     if wineserver.exists():
-        subprocess.run([str(wineserver), "-k"], env=env, capture_output=True, timeout=20)
-    subprocess.run(["pkill", "-9", "-a", "-f", GAME_PROCESS], capture_output=True)
+        try:
+            subprocess.run([str(wineserver), "-k"], env=env, capture_output=True, timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
     subprocess.run(["pkill", "-9", "-f", str(BASE / "wine") + "/"], capture_output=True)
-    return "ok"
+    for _ in range(10):
+        if not game_running():
+            return "ok"
+        time.sleep(0.5)
+    return "error: The game didn't stop. Restart your Mac (Apple menu > Restart) to close it."
 
 
 def folder_size(path):
@@ -249,13 +258,18 @@ def repair():
 def uninstall():
     if not (BASE / "game").is_dir() or not (BASE / "prefix-wine").is_dir():
         return f"error: {BASE} doesn't look like a Project Reclaimer install, so nothing was removed."
-    force_quit()
-    subprocess.run(["pkill", "-f", "workshop_helper.py"], capture_output=True)
-    if not os.environ.get("RECLAIMER_KEEP_NETWORK") and (Path(DAEMON_PLIST).exists() or DRYRUN):
-        as_admin(f"launchctl bootout system/{DAEMON} 2>/dev/null; rm -f {DAEMON_PLIST}; rm -rf {quoted(DAEMON_DIR)}",
-                 "Project Reclaimer is removing its network settings.")
+    stopped = force_quit()
+    if stopped != "ok":
+        return stopped  # (nothing deleted while the game still runs)
+    subprocess.run(["pkill", "-f", str(GAME / "workshop_helper.py")], capture_output=True)  # (only this install's)
     shutil.rmtree(APP, ignore_errors=True)
+    shutil.rmtree(APP.with_name("Project Reclaimer Metal.app"), ignore_errors=True)  # (from early versions)
     shutil.rmtree(BASE, ignore_errors=True)
+    if not os.environ.get("RECLAIMER_KEEP_NETWORK") and INSTALLED_PLIST.exists():
+        removed = as_admin(f"launchctl bootout system/{DAEMON} 2>/dev/null; rm -f {DAEMON_PLIST}; "
+                           f"rm -rf {quoted(DAEMON_DIR)}", "Project Reclaimer is removing its network setting.")
+        if not removed:
+            return "ok network-kept"  # (harmless: extra local addresses that nothing else uses)
     return "ok"
 
 
@@ -268,6 +282,13 @@ def main(argv):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
     if len(argv) == 3 and argv[1] == "remove-mod":
         result = remove_mod(argv[2])
+    elif len(argv) == 2 and argv[1] == "net-check":
+        result = net_check()
+        for _ in range(8):  # right after login the startup task may still be adding its ~1,300 addresses
+            if result == "ok":
+                break
+            time.sleep(1)
+            result = net_check()
     elif len(argv) == 2 and argv[1] in COMMANDS:
         result = COMMANDS[argv[1]]()
     else:

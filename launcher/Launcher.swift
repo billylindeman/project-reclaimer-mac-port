@@ -106,8 +106,7 @@ final class Launcher: ObservableObject {
                 update = .done("Checked when the game started")
                 steam = .done("Steam connected")
             } else {
-                runUpdate()
-                checkNetwork()
+                runUpdate()  // (then the network check and Steam: never alongside an update's own network step)
             }
         }
     }
@@ -151,9 +150,14 @@ final class Launcher: ObservableObject {
             updateProgress = nil
             if relaunchRequested { return relaunch() }
             if !update.finished { update = .warning("Couldn't check for updates. You can still play.") }
+            checkNetwork()
             checkSteam()
         })
-        if updater == nil { update = .warning("Couldn't check for updates. You can still play."); checkSteam() }
+        if updater == nil {
+            update = .warning("Couldn't check for updates. You can still play.")
+            checkNetwork()
+            checkSteam()
+        }
     }
 
     private func relaunch() {
@@ -210,7 +214,7 @@ final class Launcher: ObservableObject {
             case .error(let e):
                 signingIn = false
                 qr = nil
-                steam = .failed("Sign-in didn't finish (\(e)).")
+                steam = .failed(e.hasSuffix(".") ? e : "Sign-in didn't finish (\(e)).")
             default: break
             }
         }, onExit: { [self] _ in
@@ -295,7 +299,7 @@ final class Launcher: ObservableObject {
         guard !checkingCrash else { return }
         checkingCrash = true
         var crash: String?
-        keep(python("tools.py", ["crash-check"], onLine: { line in
+        let check = python("tools.py", ["crash-check"], onLine: { line in
             if line.hasPrefix("crash: ") { crash = String(line.dropFirst(7)) }
         }, onExit: { [self] _ in
             checkingCrash = false
@@ -308,7 +312,12 @@ final class Launcher: ObservableObject {
             } else {
                 NSApp.terminate(nil)
             }
-        }))
+        })
+        guard let check else {  // couldn't even run the check: never stay stuck on "Playing"
+            checkingCrash = false
+            return early ? gameStopped(early: true) : NSApp.terminate(nil)
+        }
+        keep(check)
     }
 
     private func gameStopped(early: Bool) {
