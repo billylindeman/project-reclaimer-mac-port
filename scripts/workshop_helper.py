@@ -14,8 +14,11 @@ Steam sign-in (used by the launcher before the game starts; prints one result li
   login-check   "ok <account>", "need-login" or "offline": does the saved Steam login still work?
   login-qr      QR sign-in: "qr-begin", "qr: <row>"..., "qr-end" for each code DepotDownloader shows, then
                 "ok <account>" (saved to steam-account) or "error: <reason>"
+  game-download <folder>   Halo 3's game files from the player's Steam copy (first install, Repair game files):
+                QR codes as above when needed, "progress: <percent>", then "ok" or "error: <plain reason>"
 
-Usage: workshop_helper.py watch | get [--in-game] <workshop id or title>... | login-check | login-qr
+Usage: workshop_helper.py watch | get [--in-game] <workshop id or title>... | login-check | login-qr |
+       game-download <folder>
 """
 import fcntl
 import json
@@ -149,10 +152,10 @@ def login_check():
     return "offline"
 
 
-def login_qr():
-    """QR sign-in, relaying each QR code DepotDownloader draws; saves the account name Steam reports."""
-    cmd = [str(DEPOT), "-app", APP_ID, "-pubfile", CHECK_ITEM, "-manifest-only", "-qr", "-remember-password",
-           "-dir", str(BASE / "logs" / "login-check")]
+def run_relaying(cmd, stop_at_login=False, on_line=None):
+    """Run DepotDownloader, relaying each QR code it draws ("qr-begin", "qr: <row>"..., "qr-end") and saving the
+    account name Steam reports at QR sign-in. Returns (returncode, account name or None, last output lines).
+    stop_at_login: stop once signed in (login-qr). on_line(line) sees every other output line."""
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     stop_with_parent(p)
     qr, name, tail = None, None, []  # qr: rows of the code being relayed, None outside a code
@@ -180,20 +183,69 @@ def login_qr():
             if m:
                 name = m.group(1)
                 ACCOUNT_FILE.write_text(name + "\n")
-            if name and re.match(r"Got \d+ licenses", line):
+            if stop_at_login and name and re.match(r"Got \d+ licenses", line):
                 p.terminate()
                 break
+            if on_line:
+                on_line(line)
         if qr is not None:
             print("qr-end", flush=True)
         p.wait(timeout=60)
     finally:
         if p.poll() is None:
             p.kill()
-    if name:
-        return f"ok {name}"
-    reason = tail[-1].strip() if tail else "sign-in did not finish"
-    reason = re.sub(r"^Unhandled exception\. [\w.]+: ", "", reason)
-    return "error: " + reason
+    return p.returncode, name, tail
+
+
+def plain_reason(tail, default):
+    reason = tail[-1].strip() if tail else default
+    return re.sub(r"^Unhandled exception\. [\w.]+: ", "", reason)
+
+
+def login_qr():
+    """QR sign-in, relaying each QR code DepotDownloader draws; saves the account name Steam reports."""
+    cmd = [str(DEPOT), "-app", APP_ID, "-pubfile", CHECK_ITEM, "-manifest-only", "-qr", "-remember-password",
+           "-dir", str(BASE / "logs" / "login-check")]
+    _, name, tail = run_relaying(cmd, stop_at_login=True)
+    return f"ok {name}" if name else "error: " + plain_reason(tail, "sign-in did not finish")
+
+
+MCC_DEPOTS = ["976731", "976738", "976739"]  # MCC base, Halo 3, Halo 3 multiplayer (~35 GB)
+NOT_OWNED = re.compile(r"is not available from this account|No subscription|AccessDenied for (app|depot)", re.I)
+
+
+def game_download(dest):
+    """Download (or check and repair) Halo 3's game files from the player's own Steam copy, for the launcher
+    window: QR codes and "progress: <percent>" lines, then "ok" or "error: <plain reason>"."""
+    Path(dest).mkdir(parents=True, exist_ok=True)
+    base = [str(DEPOT), "-app", APP_ID, "-depot", *MCC_DEPOTS, "-os", "windows", "-dir", str(dest), "-validate"]
+    last = [0.0]
+
+    def progress(line):
+        m = PROGRESS.match(line)
+        if m and time.time() - last[0] >= 1:
+            print(f"progress: {min(float(m.group(1)), 100.0):.1f}", flush=True)
+            last[0] = time.time()
+
+    name = account()
+    if name:  # the saved login first; a QR code only when it no longer works
+        rc, _, tail = run_relaying(base + ["-username", name, "-remember-password"], on_line=progress)
+        if rc == 0:
+            return "ok"
+        if not LOGIN_NEEDED.search("\n".join(tail)):
+            return game_download_error(tail)
+    rc, _, tail = run_relaying(base + ["-qr", "-remember-password"], on_line=progress)
+    return "ok" if rc == 0 else game_download_error(tail)
+
+
+def game_download_error(tail):
+    text = "\n".join(tail)
+    if NOT_OWNED.search(text):
+        return "error: This Steam account doesn't own Halo: The Master Chief Collection."
+    if OFFLINE.search(text):
+        return "error: Couldn't reach Steam. Check your internet connection and try again."
+    sys.stderr.write(text + "\n")
+    return "error: " + plain_reason(tail, "the download stopped") + " Try again to resume."
 
 
 def workshop_details(ids):
@@ -482,6 +534,10 @@ def watch():
 
 
 def main(argv):
+    if len(argv) >= 3 and argv[1] == "game-download":
+        result = game_download(argv[2])
+        print(result, flush=True)
+        return 0 if result == "ok" else 1
     if len(argv) < 2 or argv[1] not in ("watch", "get", "login-check", "login-qr"):
         print(__doc__)
         return 2

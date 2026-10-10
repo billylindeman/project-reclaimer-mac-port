@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""The launcher window's Tools menu and automatic fixes, one command per action.
+
+  net-check          "ok" or "missing": are the local network addresses Reclaimer needs on lo0?
+  net-fix            reinstall + restart the network startup task (one macOS password prompt)
+  crash-check        "crash: <plain explanation>" if the last game log shows a crash, else "ok"
+  force-quit         stop the game, Wine and wineserver for this install (frozen windows Force Quit can't close)
+  mods               JSON: downloaded Workshop mods with titles and sizes, plus free disk space
+  remove-mod <id>    delete one downloaded mod (not while the game runs)
+  report             zip the logs and versions (no Steam account name) to the Desktop: "ok <path>"
+  reset-graphics     put back the tuned graphics settings
+  forget-steam       forget the saved Steam account (the window then shows a QR code)
+  repair             re-check Halo 3's files against Steam (QR codes and progress as workshop_helper game-download)
+  uninstall          remove the app, the install folder and the network startup task
+
+Each prints "ok" (or its result) last, or "error: <plain reason>". RECLAIMER_TOOLS_DRYRUN=1 prints admin commands
+("dry-run admin: ...") instead of asking for the password, for tests.
+"""
+import importlib.util
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import zipfile
+from pathlib import Path
+
+HOME = Path.home()
+BASE = Path(os.environ.get("RECLAIMER_HOME", HOME / "Games" / "ProjectReclaimer"))
+GAME = BASE / "game"
+LOGS = BASE / "logs"
+STEAMAPPS = BASE / "prefix-wine" / "drive_c" / "Program Files (x86)" / "Steam" / "steamapps"
+WORKSHOP = STEAMAPPS / "workshop" / "content" / "976730"
+MCC_DIR = STEAMAPPS / "common" / "Halo The Master Chief Collection"
+APP = Path(os.environ.get("RECLAIMER_APP_PATH")
+           or Path(os.environ.get("RECLAIMER_APPS_DIR", HOME / "Applications")) / "Project Reclaimer.app")
+DESKTOP = Path(os.environ.get("RECLAIMER_DESKTOP", HOME / "Desktop"))
+GAME_PROCESS = os.environ.get("RECLAIMER_GAME_PROCESS", r"project-reclaimer-v[0-9.]+\.exe game-client")
+DAEMON = "local.projectreclaimer.loopback"
+DAEMON_PLIST = f"/Library/LaunchDaemons/{DAEMON}.plist"
+DAEMON_DIR = "/Library/Application Support/ProjectReclaimer"
+DRYRUN = bool(os.environ.get("RECLAIMER_TOOLS_DRYRUN"))
+
+
+def loopback_prefixes():
+    """The address ranges the installed reclaimer-loopback.sh adds (e.g. 127.0.2), so a new range is checked too."""
+    try:
+        text = (GAME / "reclaimer-loopback.sh").read_text()
+        m = re.search(r"for p in ([0-9. ]+); do", text)
+        if m:
+            return m.group(1).split()
+    except OSError:
+        pass
+    return ["127.0.0", "127.0.1", "127.0.2", "127.0.3", "127.3.1"]
+
+
+# one sample address per range (127.0.0.1 is always there, so 127.0.0.2 stands for its range)
+EXPECTED_ALIASES = [p + (".2" if p == "127.0.0" else ".1") for p in loopback_prefixes()]
+
+
+def say(line):
+    print(line, flush=True)
+
+
+def as_admin(command, prompt):
+    """Run a shell command as root behind macOS's own password dialog."""
+    if DRYRUN:
+        say("dry-run admin: " + command)
+        return True
+    script = 'do shell script {} with prompt {} with administrator privileges'.format(
+        json.dumps(command), json.dumps(prompt))
+    return subprocess.run(["/usr/bin/osascript", "-e", script], capture_output=True).returncode == 0
+
+
+def game_running():
+    return subprocess.run(["pgrep", "-a", "-f", GAME_PROCESS], capture_output=True).returncode == 0
+
+
+def helper():
+    """workshop_helper.py from this install, for its Steam and Workshop functions."""
+    if "workshop_helper" not in sys.modules:
+        spec = importlib.util.spec_from_file_location("workshop_helper", GAME / "workshop_helper.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        sys.modules["workshop_helper"] = mod
+    return sys.modules["workshop_helper"]
+
+
+def quoted(path):
+    return "'" + str(path).replace("'", "'\\''") + "'"
+
+
+# ---------------------------------------------------------------------------------------------------------------
+def lo0():
+    return subprocess.run(["/sbin/ifconfig", "lo0"], capture_output=True, text=True).stdout
+
+
+def net_check():
+    have = set(re.findall(r"inet (127\.\d+\.\d+\.\d+)", lo0()))
+    return "ok" if all(a in have for a in EXPECTED_ALIASES) else "missing"
+
+
+def net_fix():
+    """Install the startup task's files again and restart it, which re-adds every address (as install.sh does)."""
+    script, plist = GAME / "reclaimer-loopback.sh", GAME / f"{DAEMON}.plist"
+    if not script.exists() or not plist.exists():
+        return "error: This install is missing its network files. Open Project Reclaimer again to update it."
+    command = (f"mkdir -p {quoted(DAEMON_DIR)} && "
+               f"install -o root -g wheel -m 755 {quoted(script)} {quoted(DAEMON_DIR + '/reclaimer-loopback.sh')} && "
+               f"install -o root -g wheel -m 644 {quoted(plist)} {DAEMON_PLIST} && "
+               f"{{ launchctl bootout system/{DAEMON} 2>/dev/null; true; }} && "
+               f"launchctl bootstrap system {DAEMON_PLIST}")
+    if not as_admin(command, "Project Reclaimer is fixing its network settings."):
+        return "error: The network setup wasn't fixed (the password box was cancelled)."
+    if DRYRUN:
+        return "ok"
+    for _ in range(10):  # the task adds ~1,300 addresses; give it a moment
+        if net_check() == "ok":
+            return "ok"
+        time.sleep(1)
+    return "error: The network setup is still incomplete. Restart your Mac, then open Project Reclaimer again."
+
+
+CRASHES = [
+    ("stopped responding, so the game had to close",
+     "The graphics card stopped responding, so the game closed. This happens now and then on heavy modded maps. "
+     "Press Play to start again; if it keeps happening, lower Settings > Render resolution in the game."),
+    ("device lost",
+     "The graphics card stopped responding, so the game closed. Press Play to start again."),
+    (" panicked at ",
+     "Project Reclaimer hit an error and closed. Press Play to start again. If it keeps happening, use "
+     "Tools > Send a report."),
+]
+
+
+def crash_check():
+    try:
+        text = (LOGS / "client-wine.log").read_text(errors="replace")[-200000:]
+    except OSError:
+        return "ok"
+    for marker, message in CRASHES:
+        if marker in text:
+            return "crash: " + message
+    return "ok"
+
+
+def force_quit():
+    env = dict(os.environ, WINEPREFIX=str(BASE / "prefix-wine"))
+    wineserver = BASE / "wine" / "Wine Staging.app" / "Contents" / "Resources" / "wine" / "bin" / "wineserver"
+    if wineserver.exists():
+        subprocess.run([str(wineserver), "-k"], env=env, capture_output=True, timeout=20)
+    subprocess.run(["pkill", "-9", "-a", "-f", GAME_PROCESS], capture_output=True)
+    subprocess.run(["pkill", "-9", "-f", str(BASE / "wine") + "/"], capture_output=True)
+    return "ok"
+
+
+def folder_size(path):
+    return sum(f.stat().st_size for f in path.rglob("*") if f.is_file() and not f.is_symlink())
+
+
+def mod_title(folder):
+    try:
+        info = json.loads((folder / "ModInfo.json").read_text(encoding="utf-8-sig"))
+        return info.get("Title", {}).get("Neutral", "").strip() or folder.name
+    except (OSError, ValueError, AttributeError):
+        return folder.name
+
+
+def mods():
+    items = []
+    if WORKSHOP.exists():
+        for d in WORKSHOP.iterdir():
+            if d.is_dir() and d.name.isdigit():
+                items.append({"id": d.name, "title": mod_title(d), "bytes": folder_size(d)})
+    items.sort(key=lambda m: -m["bytes"])
+    return json.dumps({"free_bytes": shutil.disk_usage(BASE).free, "mods": items})
+
+
+def remove_mod(wid):
+    if not wid.isdigit():
+        return "error: That isn't a Workshop item."
+    if game_running():
+        return "error: Quit the game first."
+    folder = WORKSHOP / wid
+    if not folder.is_dir():
+        return "error: That mod isn't downloaded."
+    shutil.rmtree(folder)
+    (LOGS / "mods" / f"{wid}.json").unlink(missing_ok=True)
+    try:
+        helper().write_manifest()  # the game checks Steam's manifest to know what's installed
+    except Exception as e:  # (offline: the manifest is rewritten on the next game)
+        sys.stderr.write(f"could not update the Workshop manifest: {e}\n")
+    return "ok"
+
+
+def report():
+    account = ""
+    try:
+        account = (BASE / "steam-account").read_text().strip()
+    except OSError:
+        pass
+
+    def scrub(text):
+        return text.replace(account, "<steam account>") if account else text
+    summary = [f"Project Reclaimer Mac Port report, {time.strftime('%Y-%m-%d %H:%M')}"]
+    for label, cmd in [("macOS", ["sw_vers", "-productVersion"]), ("Mac", ["sysctl", "-n", "machdep.cpu.brand_string"]),
+                       ("Memory", ["sysctl", "-n", "hw.memsize"])]:
+        value = subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+        summary.append(f"{label}: " + (f"{int(value) / 2**30:.0f} GB" if label == "Memory" and value.isdigit() else value))
+    try:
+        summary.append("Mac port version: " + (BASE / "version").read_text().strip())
+    except OSError:
+        summary.append("Mac port version: 1.0 or older")
+    summary.append("Game: " + ", ".join(sorted(p.name for p in GAME.glob("project-reclaimer-v*.exe"))))
+    summary.append(f"Free disk space: {shutil.disk_usage(BASE).free / 1e9:.0f} GB")
+    summary.append("Network addresses: " + net_check())
+    summary.append("Workshop mods: " + ", ".join(m["title"] for m in json.loads(mods())["mods"]))
+    DESKTOP.mkdir(parents=True, exist_ok=True)
+    path = DESKTOP / f"Project Reclaimer report {time.strftime('%Y-%m-%d %H.%M')}.zip"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("summary.txt", scrub("\n".join(summary) + "\n"))
+        for log in sorted(LOGS.glob("*.log")):
+            z.writestr(f"logs/{log.name}", scrub(log.read_text(errors="replace")[-2_000_000:]))
+    return f"ok {path}"
+
+
+def reset_graphics():
+    if game_running():  # (the game writes its settings when it quits)
+        return "error: Quit the game first."
+    p = subprocess.run([sys.executable, "-I", str(GAME / "presets.py"), "wine"], capture_output=True, text=True,
+                       env=dict(os.environ, RECLAIMER_HOME=str(BASE)))
+    return "ok" if p.returncode == 0 else "error: The graphics settings couldn't be changed."
+
+
+def forget_steam():
+    (BASE / "steam-account").unlink(missing_ok=True)
+    return "ok"
+
+
+def repair():
+    if game_running():
+        return "error: Quit the game first."
+    return helper().game_download(str(MCC_DIR))
+
+
+def uninstall():
+    if not (BASE / "game").is_dir() or not (BASE / "prefix-wine").is_dir():
+        return f"error: {BASE} doesn't look like a Project Reclaimer install, so nothing was removed."
+    force_quit()
+    subprocess.run(["pkill", "-f", "workshop_helper.py"], capture_output=True)
+    if not os.environ.get("RECLAIMER_KEEP_NETWORK") and (Path(DAEMON_PLIST).exists() or DRYRUN):
+        as_admin(f"launchctl bootout system/{DAEMON} 2>/dev/null; rm -f {DAEMON_PLIST}; rm -rf {quoted(DAEMON_DIR)}",
+                 "Project Reclaimer is removing its network settings.")
+    shutil.rmtree(APP, ignore_errors=True)
+    shutil.rmtree(BASE, ignore_errors=True)
+    return "ok"
+
+
+COMMANDS = {"net-check": net_check, "net-fix": net_fix, "crash-check": crash_check, "force-quit": force_quit,
+            "mods": mods, "report": report, "reset-graphics": reset_graphics, "forget-steam": forget_steam,
+            "repair": repair, "uninstall": uninstall}
+
+
+def main(argv):
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
+    if len(argv) == 3 and argv[1] == "remove-mod":
+        result = remove_mod(argv[2])
+    elif len(argv) == 2 and argv[1] in COMMANDS:
+        result = COMMANDS[argv[1]]()
+    else:
+        print(__doc__)
+        return 2
+    say(result)
+    return 1 if result.startswith("error: ") else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

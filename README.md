@@ -18,49 +18,41 @@ and adds a **Project Reclaimer** app to your Mac.
 
 ## Install
 
-Easiest: open **Terminal** (Spotlight → "Terminal"), paste this line, press Return, and follow the prompts:
+1. Download [Project-Reclaimer-Mac-Port.dmg](https://github.com/mattromano/project-reclaimer-mac-port/releases/latest/download/Project-Reclaimer-Mac-Port.dmg)
+   and open it.
+2. Double-click **Project Reclaimer**. It isn't from the App Store or signed by a paid Apple developer account, so
+   the first time macOS blocks it: click **Done**, open System Settings → Privacy & Security, and click
+   **Open Anyway** (the disk image has a picture of this). You only do this once.
+3. The window checks your Mac (Apple Silicon, macOS 14+, ~45 GB free, Apple's developer tools, which it helps you
+   install if they're missing) and shows **Install**. Then it:
+   - downloads Wine, DXVK-macOS, MoltenVK, Mesa, DepotDownloader and the latest Project Reclaimer, checking every
+     file against a known SHA-256 checksum;
+   - shows a **QR code**: scan it with the Steam app on your phone. Only Halo 3 is downloaded, from your own Steam
+     account (~35 GB), with a progress bar and the time left. Nothing is shared from anyone else's copy;
+   - asks for your **Mac password** once, for a small startup task that enables the local network addresses
+     Reclaimer uses (`127.0.0.x`–`127.0.3.x`, `127.3.1.x`; macOS only enables `127.0.0.1` by default);
+   - puts **Project Reclaimer** in `~/Applications` and opens it. You can eject and delete the disk image.
+
+If something fails, the window says what happened; **Try Again** picks up where it stopped. After this, the app keeps
+itself, Project Reclaimer and your Workshop mods up to date every time you open it.
+
+**Prefer Terminal?** This does the same install:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/mattromano/project-reclaimer-mac-port/main/install.sh)"
 ```
 
-What it does, in order:
-
-1. Installs Rosetta 2 if needed.
-2. Downloads Wine, DXVK-macOS, MoltenVK, Mesa, DepotDownloader and the latest Project Reclaimer, checking every
-   file against a known SHA-256 checksum.
-3. Shows a **QR code**: open the Steam app on your phone and scan it. Only Halo 3 is downloaded from your own
-   Steam account (~35 GB), so this part takes a while. Nothing is shared from anyone else's copy.
-4. Asks for your **Mac password** once to install a small startup task that enables the local network addresses
-   Reclaimer uses (`127.0.0.x`–`127.0.3.x`, `127.3.1.x`; macOS only enables `127.0.0.1` by default).
-5. Puts **Project Reclaimer** in `~/Applications`, so it shows up in Spotlight and Launchpad.
-
-You only run the installer once. After that the app keeps itself, Project Reclaimer and your Workshop mods up to
-date every time you open it.
-
-If anything fails, run the same command again: finished steps are skipped and the Steam download resumes.
-
-**Prefer double-clicking?** Download
-[Project-Reclaimer-Mac-Port.dmg](https://github.com/mattromano/project-reclaimer-mac-port/releases/latest/download/Project-Reclaimer-Mac-Port.dmg),
-open it and double-click **Install Project Reclaimer**: it opens Terminal and runs the same command. It isn't signed
-by Apple, so the first time macOS refuses it: click Done, then System Settings → Privacy & Security → **Open Anyway**.
-(`scripts/make_dmg.sh` builds the disk image; `scripts/make_launcher.sh` builds the launcher window from
-`launcher/`.)
+(`scripts/make_dmg.sh` builds the disk image; `scripts/make_launcher.sh` builds the app from `launcher/`.)
 
 ## Upgrading from 1.0
 
-Had the first version (the one that asked for your Steam account name)? Move to the new one once, and from then on
-it updates itself:
+Had the first version (the one that asked for your Steam account name)? Quit the game, then open **Project
+Reclaimer** from the new disk image: it offers a one-time **Upgrade** that keeps your Halo 3 files, mods and graphics
+settings (no big download, a minute or two). From then on the app updates itself. If the window shows a QR code, scan
+it with the Steam app: the old account-name login is gone. (Running the Terminal line above again works too.)
 
-1. Quit the game if it's running.
-2. Run the installer again: the same Terminal line as above, or the disk image's **Install Project Reclaimer**
-   (the 1.0 disk image works too). It keeps your Halo 3 files, mods and graphics settings, so there's no 35 GB download
-   and no QR code for the game files. It takes a minute or two.
-3. Open **Project Reclaimer**. You now get the new window instead of the game starting straight away. If it shows a
-   QR code, scan it with the Steam app (the old account-name login is gone), then press **Play**.
-
-If you had moved the app out of your home folder's Applications folder (for example into the main Applications
-folder), delete that old copy: the new one is in `~/Applications`, and Spotlight finds it there.
+If you had moved the old app out of your home folder's Applications folder, delete that copy: the new one is in
+`~/Applications`, and Spotlight finds it there.
 
 ## Playing
 
@@ -80,6 +72,15 @@ Open **Project Reclaimer** from Spotlight or Launchpad. A small window gets ever
 The window's **Problems joining a server?** section explains the game messages players hit most (a server on an
 older version, a server with an outdated mod, and so on) and has a **Show logs** button for sending you the logs.
 
+Before Play, the window also checks the local network addresses the game needs (they can go missing after a restart
+or a macOS update) and fixes them with one password prompt. If the game crashes, the window says what happened in
+plain words and stays open for **Play again**.
+
+**Tools** (the gear button) handles the rest without Terminal: **Force Quit** a frozen game, **Repair** Halo 3's
+files against Steam, see **Mods and disk space** and remove mods, **Restore** the recommended graphics settings,
+**Switch** Steam accounts, **Make Report** (a zip of the logs on your Desktop, without your Steam account name), and
+**Uninstall**.
+
 Why mods need Steam: without the Steam client, the game downloads mods from the game servers, which cap sharing at
 ~2.5 MB/s each, or shows a "Start Steam…" error for Workshop-only mods. A helper next to the game fetches the same
 mods from Steam's CDN instead (~40 MB/s measured: 1.6 GB in 37 s). Mods are 1–9 GB each. To get a mod before
@@ -94,12 +95,15 @@ To put back the tuned defaults, run the install command with `RECLAIMER_RESET_GR
 |---|---|
 | "Could not join that server" on every server, especially after a Reclaimer update | A new release may use new local addresses. Quit the game and open Project Reclaimer again: the update installs the fix (it may ask for your Mac password). |
 | Mods won't download / "Start Steam…" | Look at the Project Reclaimer window: if it shows a QR code, scan it with the Steam app. If it says a mod couldn't download, press Try Again in the game. |
-| Game won't start right after a reboot | The startup task re-adds the network addresses at boot; wait a few seconds after logging in. |
+| Game won't start right after a reboot | The window checks the network addresses before Play and fixes them (asks for your Mac password). |
 | Stuck on "Synchronizing players" for minutes | Usually the server (its clock is stuck for everyone). Try another server. |
 | "Graphics card stopped responding" | A GPU fault in the DirectX → Metal translation, mostly on heavy modded maps. Relaunch; lower Settings → render resolution if it repeats. |
-| Something else | Logs are in `~/Games/ProjectReclaimer/logs/` (`launcher.log`, `client-wine.log`, `workshop-helper.log`). Each launch overwrites the game log, so copy it before relaunching. |
+| Game frozen and won't close | Tools → **Force Quit**. |
+| Something else | Tools → **Make Report**, and send the zip it puts on your Desktop. Logs are in `~/Games/ProjectReclaimer/logs/`. |
 
 ## Uninstall
+
+Tools → **Uninstall** in the app. Or in Terminal:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/mattromano/project-reclaimer-mac-port/main/uninstall.sh)"

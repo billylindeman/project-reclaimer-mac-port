@@ -1,30 +1,39 @@
 #!/bin/bash
-# make_dmg.sh [out.dmg]: build Project-Reclaimer-Mac-Port.dmg with double-click installer/uninstaller files.
-# They run the same one-line installer from GitHub, so the disk image never goes stale.
+# make_dmg.sh [out.dmg]: build Project-Reclaimer-Mac-Port.dmg: the Project Reclaimer app (the launcher window, which
+# installs everything on first open, upgrades a 1.0 install, and otherwise opens the installed app), a picture of
+# macOS's one-time "Open Anyway" step, and a read-me. The app fetches the installer from GitHub, so it never goes stale.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=${1:-dist/Project-Reclaimer-Mac-Port.dmg}
-RAW=https://raw.githubusercontent.com/mattromano/project-reclaimer-mac-port/main
 STAGE=$(mktemp -d)/"Project Reclaimer"
-mkdir -p "$STAGE" "$(dirname "$OUT")"
+APP="$STAGE/Project Reclaimer.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$(dirname "$OUT")"
 
-cat > "$STAGE/Install Project Reclaimer.command" <<CMD
-#!/bin/bash
-# Installs Halo 3 + Project Reclaimer under Wine (https://github.com/mattromano/project-reclaimer-mac-port).
-# Safe to run again: finished steps are skipped.
-clear
-/bin/bash -c "\$(curl -fsSL $RAW/install.sh)"
-echo; read -r -p "Press Return to close this window." _
-CMD
+cp launcher/ProjectReclaimer "$APP/Contents/MacOS/ProjectReclaimer"
+cp launcher/Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
+# no ReclaimerHome key: that marks the installed copy (see LauncherApp.swift), this one installs or hands off
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>Project Reclaimer</string>
+  <key>CFBundleDisplayName</key><string>Project Reclaimer</string>
+  <key>CFBundleIdentifier</key><string>local.projectreclaimer.setup</string>
+  <key>CFBundleExecutable</key><string>ProjectReclaimer</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>$(cat VERSION)</string>
+  <key>LSMinimumSystemVersion</key><string>14.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
+</dict>
+</plist>
+PLIST
+codesign --force --sign - "$APP"
 
-cat > "$STAGE/Uninstall Project Reclaimer.command" <<CMD
-#!/bin/bash
-# Removes Project Reclaimer Mac Port (apps, ~/Games/ProjectReclaimer, the network startup task).
-clear
-/bin/bash -c "\$(curl -fsSL $RAW/uninstall.sh)"
-echo; read -r -p "Press Return to close this window." _
-CMD
-chmod +x "$STAGE/"*.command
+launcher/ProjectReclaimer --render-guide "$STAGE" >/dev/null
+mv "$STAGE/guide.png" "$STAGE/How to open it the first time.png"
 
 cat > "$STAGE/Read Me First.txt" <<'TXT'
 Project Reclaimer for Mac (Halo 3 community servers, Forge, Workshop mods)
@@ -32,20 +41,21 @@ Project Reclaimer for Mac (Halo 3 community servers, Forge, Workshop mods)
 You need: an Apple Silicon Mac (M1 or newer) on macOS 14 or newer, Halo: The Master Chief Collection on
 Steam, the Steam app on your phone, ~45 GB free disk space, and your Mac password once.
 
-1. Double-click "Install Project Reclaimer".
-   The first time, macOS says it can't verify the developer (this isn't from the App Store). Click Done,
-   open System Settings > Privacy & Security, scroll down and click "Open Anyway" next to
-   "Install Project Reclaimer", then confirm.
-2. A Terminal window opens and does the rest. When a QR code appears, open the Steam app on your phone and
-   scan it: Halo 3 (~35 GB) downloads from your own Steam account. Type your Mac password when asked.
-3. When it says Done, open "Project Reclaimer" from Spotlight or Launchpad. Its window updates everything,
-   shows a QR code to scan with the Steam app if mods need you to sign in, and then you press Play.
+1. Double-click "Project Reclaimer".
+   The first time, macOS blocks it because it isn't from the App Store. The picture
+   "How to open it the first time" shows how to allow it (System Settings > Privacy & Security >
+   Open Anyway). You only do this once.
+2. The Project Reclaimer window checks your Mac and installs everything. When it shows a QR code,
+   scan it with the Steam app on your phone: Halo 3 (~35 GB) downloads from your own Steam account.
+   macOS asks for your Mac password once.
+3. When it's done, it opens Project Reclaimer from your Applications folder: press Play. You can eject
+   this disk image and move it to the Trash.
 
-Had the first version (it asked for your Steam account name)? Quit the game and do step 1 once more: it keeps
-your game files, mods and settings. Then open Project Reclaimer and scan the QR code if the window shows one.
+Had the first version (it asked for your Steam account name)? Open "Project Reclaimer" from this disk image:
+it offers a one-time Upgrade that keeps your game files, mods and settings.
 
-You only need this disk image once: the app keeps itself and the game up to date each time you open it.
-If anything fails, run the installer again: it picks up where it stopped.
+From then on the app keeps itself and the game up to date, and its Tools button handles the rest
+(force quit, repair, mods and disk space, reports, uninstall).
 More help: https://github.com/mattromano/project-reclaimer-mac-port
 TXT
 

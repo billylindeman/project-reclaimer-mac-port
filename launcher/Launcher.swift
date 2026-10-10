@@ -1,0 +1,380 @@
+// The launcher window's state: updates, Steam sign-in, mods, Play, and what happens around the game.
+import AppKit
+import SwiftUI
+import UserNotifications
+
+// MARK: - state
+
+enum Step: Equatable {
+    case waiting, working(String), done(String), warning(String), failed(String)
+    var finished: Bool { if case .waiting = self { return false }; if case .working = self { return false }; return true }
+}
+
+@MainActor
+final class Launcher: ObservableObject {
+    // state changes go to logs/launcher.log, so a friend's problem can be read from one file
+    @Published var update: Step = .waiting { didSet { if update != oldValue { log("update: \(update)") } } }
+    @Published var updateProgress: Double?
+    @Published var steam: Step = .waiting { didSet { if steam != oldValue { log("steam: \(steam)") } } }
+    @Published var signingIn = false { didSet { if signingIn != oldValue { log("signing in: \(signingIn)") } } }
+    @Published var qr: QRGrid? { didSet { if (qr == nil) != (oldValue == nil) { log("qr code shown: \(qr != nil)") } } }
+    @Published var mods: [ModStatus] = [] {
+        didSet {
+            let summary = mods.map { "\($0.name)=\($0.state)" }
+            if summary != oldValue.map({ "\($0.name)=\($0.state)" }) { log("mods: \(summary)") }
+            // while playing the window is behind the game: say it with a notification
+            if playing { for n in modNotifications(before: oldValue, after: mods) { notify(n.title, n.body) } }
+        }
+    }
+    @Published var playing = false { didSet { if playing != oldValue { log("playing: \(playing)") } } }
+    @Published var gameError: String? { didSet { if let e = gameError { log("game error: \(e)") } } }
+    @Published var steamSlow = false  // the Steam check is taking long: offer Skip
+    @Published var link = ""
+    @Published var linkError: String?
+    @Published var helpOpen = false
+    @Published var network: Step? { didSet { if network != oldValue, let n = network { log("network: \(n)") } } }
+    @Published var notice: String?   // a plain-language note, e.g. after Tools stopped the game
+    @Published var showTools = false
+    let tools = ToolsModel()
+    private var checkingCrash = false
+
+    private let started = Date()
+    private var running: [LineProcess] = []
+    private var updater: LineProcess?
+    private var qrProcess: LineProcess?
+    private var game: LineProcess?
+    private var playedAt = Date.distantPast
+    private var relaunchRequested = false
+    private var waitingForLogin: Set<String> = []  // mods the helper couldn't download for lack of a Steam login
+    private var retried: Set<String> = []          // each is retried once per session, so nothing can loop
+    private var checkingSteam = false
+    private var steamSkipped = false                // the player chose Skip: don't ask again this session
+    private var helperRunning = false
+    private var gameGoneSince: Date?
+    private var timer: Timer?
+    private var ticks = 0
+    private var didStart = false
+
+    var steamReady: Bool { if case .done = steam { return true }; if case .warning = steam { return true }; return false }
+    var ready: Bool { update.finished && steamReady && !playing && network?.finished != false }
+
+    var logging = true
+
+    private func log(_ text: String) {
+        guard logging, let h = LineProcess.logFile() else { return }
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        h.write(Data("\(stamp) launcher \(text)\n".utf8))
+        try? h.close()
+    }
+
+    private var notificationsAllowed = false
+
+    private func notify(_ title: String, _ body: String) {
+        guard logging else { return }
+        log("notification: \(title)")
+        guard notificationsAllowed else {
+            // macOS only lets apps signed by a registered developer post their own notifications; AppleScript's
+            // (shown as Script Editor) work for everyone
+            func quoted(_ s: String) -> String {
+                "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+            }
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            p.arguments = ["-e", "display notification \(quoted(body)) with title \(quoted(title)) sound name \"Glass\""]
+            try? p.run()
+            return
+        }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content,
+                                                                     trigger: nil))
+    }
+
+    func start() {
+        guard !didStart else { return }
+        didStart = true
+        log("started (home \(home.path))")
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+            MainActor.assumeIsolated { self.tick() }
+        }
+        processRunning(gameProcess) { [self] running in
+            if running {  // opened again while playing: just show mod downloads
+                playing = true
+                playedAt = .distantPast
+                update = .done("Checked when the game started")
+                steam = .done("Steam connected")
+            } else {
+                runUpdate()
+                checkNetwork()
+            }
+        }
+    }
+
+    /// The local network addresses Reclaimer needs (added by a startup task) can go missing, e.g. right after a restart
+    /// or a macOS update; without them every server refuses the join. Fix them before Play, with one password box.
+    func checkNetwork() {
+        keep(python("tools.py", ["net-check"], onLine: { [self] line in
+            guard line == "missing" else { return }
+            network = .working("Fixing the network setup. macOS will ask for your Mac password.")
+            keep(python("tools.py", ["net-fix"], onLine: { [self] result in
+                if result == "ok" { network = .done("Fixed") }
+                else if result.hasPrefix("error: ") { network = .warning(String(result.dropFirst(7))) }
+            }, onExit: { [self] _ in
+                if network?.finished == false { network = .warning("The network setup couldn't be fixed. Servers may refuse to let you join.") }
+            }))
+        }, onExit: { _ in }))
+    }
+
+    private func keep(_ p: LineProcess?) { if let p { running.append(p) } }
+
+    // 1. updates
+    private func runUpdate() {
+        // right after restarting for a Mac port update, only the game is checked: never restart twice in a row
+        let relaunched = CommandLine.arguments.contains("--relaunched")
+        update = .working("Checking for updates…")
+        updater = python("updater.py", [relaunched ? "game" : "run"], onLine: { [self] line in
+            switch UpdaterEvent(line: line) {
+            case .status(let s): update = .working(s); updateProgress = nil
+            case .progress(let v): updateProgress = v
+            case .relaunch: relaunchRequested = true
+            case .done(let s):
+                update = .done(s == "updated" ? "Updated to the latest version"
+                               : s == "up to date" ? "Up to date" : s.prefix(1).uppercased() + s.dropFirst())
+            case .offline: update = .warning("Couldn't check for updates right now. You can still play.")
+            case .error(let e): update = .warning("An update didn't finish: \(e). You can still play.")
+            case .other: break
+            }
+        }, onExit: { [self] _ in
+            updater = nil
+            updateProgress = nil
+            if relaunchRequested { return relaunch() }
+            if !update.finished { update = .warning("Couldn't check for updates. You can still play.") }
+            checkSteam()
+        })
+        if updater == nil { update = .warning("Couldn't check for updates. You can still play."); checkSteam() }
+    }
+
+    private func relaunch() {
+        update = .working("Restarting the launcher…")
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // wait until this instance has really quit, or `open` would just bring the quitting one forward
+        p.arguments = ["-c", "while kill -0 $1 2>/dev/null; do sleep 0.2; done; /usr/bin/open -n \"$0\" --args --relaunched",
+                       Bundle.main.bundlePath, String(getpid())]
+        try? p.run()
+        NSApp.terminate(nil)
+    }
+
+    // 2. Steam sign-in (for Workshop mods)
+    func checkSteam() {
+        checkingSteam = true
+        steamSlow = false
+        steam = .working("Checking your Steam sign-in…")
+        let check = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [self] in
+            if checkingSteam, Date().timeIntervalSince(check) >= 10 { steamSlow = true }
+        }
+        keep(python("workshop_helper.py", ["login-check"], onLine: { [self] line in
+            guard checkingSteam else { return }  // skipped meanwhile
+            switch SteamEvent(line: line) {
+            case .ok(let account): steam = .done("Signed in as \(account)"); retryWaitingMods()
+            case .needLogin: signIn()
+            case .offline: steam = .warning("Can't reach Steam right now. Mods may download slowly from game servers.")
+            default: break
+            }
+        }, onExit: { [self] _ in
+            checkingSteam = false
+            steamSlow = false
+            if case .working = steam, !signingIn { steam = .warning("Couldn't check Steam. Mods may download slowly.") }
+        }))
+    }
+
+    func signIn() {
+        qrProcess?.stop()
+        signingIn = true
+        qr = nil
+        steam = .working("Sign in to Steam so mods download fast")
+        var collector = QRCollector()
+        qrProcess = python("workshop_helper.py", ["login-qr"], onLine: { [self] line in
+            let event = SteamEvent(line: line)
+            collector.handle(event)
+            switch event {
+            case .qrEnd: qr = collector.current
+            case .ok(let account):
+                signingIn = false
+                qr = nil
+                steam = .done("Signed in as \(account)")
+                retryWaitingMods()
+            case .error(let e):
+                signingIn = false
+                qr = nil
+                steam = .failed("Sign-in didn't finish (\(e)).")
+            default: break
+            }
+        }, onExit: { [self] _ in
+            if signingIn {
+                signingIn = false
+                qr = nil
+                steam = .failed("Sign-in didn't finish.")
+            }
+        })
+        // (never pulls the window in front of the game: the helper posts a notification instead)
+    }
+
+    func skipSteam() {
+        steamSkipped = true
+        checkingSteam = false
+        steamSlow = false
+        signingIn = false
+        qrProcess?.stop()
+        qr = nil
+        steam = .warning("Not signed in. Mods download slowly from game servers, and some won't download.")
+    }
+
+    private func retryWaitingMods() {
+        let ids = Array(waitingForLogin.subtracting(retried))
+        waitingForLogin = []
+        guard !ids.isEmpty else { return }
+        retried.formUnion(ids)
+        keep(python("workshop_helper.py", ["get"] + (playing ? ["--in-game"] : []) + ids,
+                    onLine: { _ in }, onExit: { _ in }))
+    }
+
+    // 3. mods
+    func getMod() {
+        linkError = nil
+        guard let id = workshopID(from: link) else {
+            linkError = "Paste a Steam Workshop link (it has “?id=” in it)."
+            return
+        }
+        guard case .done = steam else {
+            linkError = steamSkipped ? "Sign in to Steam first: reopen the app to get the QR code again."
+                                     : "Sign in to Steam first."
+            return
+        }
+        link = ""
+        keep(python("workshop_helper.py", ["get"] + (playing ? ["--in-game"] : []) + [id],
+                    onLine: { _ in }, onExit: { _ in }))
+    }
+
+    // 4. play
+    func play() {
+        notice = nil
+        // asked once, on the first Play: mod downloads are announced with notifications while the game is in front
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            let why = error.map { " (\($0.localizedDescription))" } ?? ""
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.notificationsAllowed = granted
+                    self.log("notifications allowed: \(granted)\(why)")
+                }
+            }
+        }
+        gameError = nil
+        playing = true
+        playedAt = Date()
+        gameGoneSince = nil
+        game = LineProcess("/bin/zsh", [gameDir.appendingPathComponent("launch.sh").path],
+                           onLine: { _ in }, onExit: { _ in })
+        if game == nil { gameStopped(early: true) }
+    }
+
+    /// The game ended within seconds of Play: say so and let the player try again, instead of quietly closing.
+    /// Called by Tools > Force quit: the window stays, ready to Play again.
+    func gameForceQuit() {
+        playing = false
+        gameGoneSince = nil
+        notice = "The game was stopped. Press Play to start it again."
+    }
+
+    /// The game ended: if its log shows a crash, say what happened and stay open for Play again; otherwise close
+    /// (or, within seconds of Play, say it closed right away).
+    private func gameEnded(early: Bool) {
+        guard !checkingCrash else { return }
+        checkingCrash = true
+        var crash: String?
+        keep(python("tools.py", ["crash-check"], onLine: { line in
+            if line.hasPrefix("crash: ") { crash = String(line.dropFirst(7)) }
+        }, onExit: { [self] _ in
+            checkingCrash = false
+            if let crash {
+                playing = false
+                gameGoneSince = nil
+                gameError = crash
+            } else if early {
+                gameStopped(early: true)
+            } else {
+                NSApp.terminate(nil)
+            }
+        }))
+    }
+
+    private func gameStopped(early: Bool) {
+        playing = false
+        gameGoneSince = nil
+        if early {
+            let log = home.appendingPathComponent("logs/client-wine.log").path
+                .replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")
+            gameError = "The game closed right after starting. Press Play to try again. If it keeps happening, "
+                + "send \(log) to whoever set this up for you."
+        }
+    }
+
+    // for automated end-to-end tests only: press Play / download a mod as soon as the window allows it
+    private let env = ProcessInfo.processInfo.environment
+    private lazy var testAutoplay = env["RECLAIMER_TEST_AUTOPLAY"] == "1"
+    private lazy var testGet = env["RECLAIMER_TEST_GET"]
+
+    private func tick() {
+        ticks += 1
+        running.removeAll { !$0.isRunning }
+        if let id = testGet, case .done = steam { testGet = nil; link = id; getMod() }
+        if testAutoplay, ready { testAutoplay = false; play() }
+        // a stuck update (it has its own network timeouts, so this is a last resort) never keeps Play off for good
+        if let u = updater, Date().timeIntervalSince(started) > 600 {
+            u.stop()
+            updater = nil
+            update = .warning("The update took too long and was stopped. You can still play.")
+            checkSteam()
+        }
+        // a status still saying "downloading" with no helper process left was interrupted (e.g. the helper crashed)
+        let now = Date().timeIntervalSince1970
+        mods = ModStatus.load(directory: home.appendingPathComponent("logs/mods"), since: started.addingTimeInterval(-5))
+            .map { m in
+                var m = m
+                if m.isDownloading, !helperRunning, now - m.time > 30 { m.state = "failed" }
+                return m
+            }
+        // the helper found no working Steam login (e.g. it expired mid-game): check it again, which shows the QR
+        // code if it really is gone, then retry those mods once; not after the player chose Skip
+        let needLogin = Set(mods.filter { $0.state == "login_needed" }.map(\.id)).subtracting(retried)
+        if !needLogin.isSubset(of: waitingForLogin) {
+            waitingForLogin.formUnion(needLogin)
+            if !signingIn, !checkingSteam, !steamSkipped { checkSteam() }
+        }
+        guard ticks % 2 == 0 else { return }
+        processRunning(#"workshop_helper\.py (watch|get)"#) { [self] in helperRunning = $0 }
+        guard playing else { return }
+        processRunning(gameProcess) { [self] gameUp in
+            guard playing else { return }
+            if game?.isRunning == true || gameUp {
+                gameGoneSince = nil
+                return
+            }
+            if Date().timeIntervalSince(playedAt) < 20 { return gameEnded(early: true) }
+            gameGoneSince = gameGoneSince ?? Date()
+            // 15 s grace: Reclaimer restarts itself for some settings. Stay while a mod is still downloading (the
+            // helper finishes it after the game; an interrupted one shows as failed above) or a sign-in is open
+            if Date().timeIntervalSince(gameGoneSince!) > 15, !mods.contains(where: \.isDownloading), !signingIn {
+                gameEnded(early: false)
+            }
+        }
+    }
+
+    func shutdown() {
+        log("quitting")
+        qrProcess?.stop()
+    }
+}

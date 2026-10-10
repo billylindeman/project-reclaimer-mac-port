@@ -88,5 +88,40 @@ check(modNotifications(before: [dl], after: [ready]).map(\.title) == ["Hugegrass
 check(modNotifications(before: [], after: [old]).isEmpty, "already-ready mod at startup: no notification")
 check(modNotifications(before: [ready], after: [ready]).isEmpty, "no repeat when ready")
 
+// launch modes
+let fm = FileManager.default
+let h = fm.temporaryDirectory.appendingPathComponent("launcher-mode-\(getpid())")
+try? fm.removeItem(at: h)
+check(launchMode(home: h, isInstalledApp: false, installedAppExists: false) == .setup, "nothing installed")
+try? fm.createDirectory(at: h.appendingPathComponent("game"), withIntermediateDirectories: true)
+try? fm.createDirectory(at: h.appendingPathComponent("wine"), withIntermediateDirectories: true)
+check(launchMode(home: h, isInstalledApp: true, installedAppExists: true) == .upgrade, "1.0 install")
+try? "1.2.0".write(to: h.appendingPathComponent("version"), atomically: true, encoding: .utf8)
+check(launchMode(home: h, isInstalledApp: false, installedAppExists: true) == .handOff, "DMG copy, installed")
+check(launchMode(home: h, isInstalledApp: false, installedAppExists: false) == .launcher, "DMG copy, app deleted")
+check(launchMode(home: h, isInstalledApp: true, installedAppExists: true) == .launcher, "installed app")
+try? fm.removeItem(at: h.appendingPathComponent("wine"))
+check(launchMode(home: h, isInstalledApp: true, installedAppExists: true) == .setup, "half-installed: setup resumes")
+try? fm.removeItem(at: h)
+
+// installer output in GUI mode
+check(SetupEvent(line: "\u{1B}[1m==> Wine (Gcenx Wine Staging 11.18)\u{1B}[0m") == .step("Wine (Gcenx Wine Staging 11.18)"), "step")
+check(SetupEvent(line: "progress: 42.5") == .progress(0.425), "progress")
+check(SetupEvent(line: "error: Couldn't reach Steam.") == .error("Couldn't reach Steam."), "error")
+check(SetupEvent(line: "qr-begin") == .steam(.qrBegin), "qr")
+check(SetupEvent(line: "    ok") == .other, "other")
+check(friendlyStep("Halo 3 game files (your Steam copy)") == "Downloading Halo 3 from your Steam account", "friendly")
+check(friendlyStep("Project Reclaimer Mac Port") == nil && friendlyStep("Done") == nil, "hidden steps")
+check(friendlyStep("Something new") == "Something new", "unknown steps shown as they are")
+
+// time remaining
+var est = RateEstimator()
+let t0 = Date()
+check(est.remaining(fraction: 0.10, now: t0) == nil, "first sample")
+check(est.remaining(fraction: 0.20, now: t0.addingTimeInterval(60)) == "About 8 minutes left", "rate")
+var est2 = RateEstimator()
+_ = est2.remaining(fraction: 0, now: t0)
+check(est2.remaining(fraction: 0.01, now: t0.addingTimeInterval(60)) == "About 2 hours left", "hours")
+
 print(failures == 0 ? "All launcher tests passed" : "\(failures) launcher test(s) failed")
 exit(failures == 0 ? 0 : 1)

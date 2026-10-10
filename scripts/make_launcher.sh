@@ -10,7 +10,7 @@ if [ "${1:-}" = test ]; then
   "$OUT"
   exit
 fi
-swiftc "${FLAGS[@]}" -parse-as-library launcher/LauncherCore.swift launcher/LauncherApp.swift -o launcher/ProjectReclaimer
+swiftc "${FLAGS[@]}" -parse-as-library launcher/*.swift -o launcher/ProjectReclaimer
 codesign --force --sign - launcher/ProjectReclaimer
 SUM=$(shasum -a 256 launcher/ProjectReclaimer | cut -d' ' -f1)
 sed -i '' -E "s/^LAUNCHER_SHA=[^ ]*/LAUNCHER_SHA=$SUM/" install.sh

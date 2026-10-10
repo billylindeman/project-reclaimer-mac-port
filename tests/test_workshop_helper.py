@@ -342,6 +342,69 @@ class HelperTest(unittest.TestCase):
             first.kill()
             first.wait()
 
+    # ---- game-download (first install, and Repair game files) -------------------------------------------------
+    def depot_seq(self, runs):
+        """A fake DepotDownloader that behaves differently on each run (for "saved login fails, then QR")."""
+        script = self.home / "tools" / "DepotDownloader"
+        specs = []
+        for i, (lines, rc) in enumerate(runs):
+            spec = self.home / f"run{i}.json"
+            spec.write_text(json.dumps({"lines": lines, "rc": rc, "args_log": str(self.args_log)}))
+            specs.append(str(spec))
+        counter = self.home / "runs"
+        counter.write_text("0")
+        real = script.read_text()
+        script.write_text(real.replace('spec = json.loads(Path(os.environ["FAKE_DEPOT"]).read_text())', (
+            'n = int(Path(%r).read_text()); Path(%r).write_text(str(n + 1))\n'
+            'spec = json.loads(Path(%r[n]).read_text())') % (str(counter), str(counter), specs)))
+
+    def test_game_download_first_install_signs_in_with_qr(self):
+        dest = self.home / "mcc"
+        self.fake(["Connecting to Steam3... Done!", *QR, SUCCESS, " Done!", "Got 442 licenses for account!",
+                   "  5.00% halo3/maps/a.map", " 50.00% halo3/maps/b.map", "100.00% halo3/halo3.dll",
+                   "Total downloaded: 35000000000 bytes"])
+        rc, out = self.run_helper("game-download", str(dest))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("qr-begin", out)
+        self.assertIn("qr-end", out)
+        self.assertTrue(any(l.startswith("progress: ") for l in out), out)
+        self.assertEqual(out[-1], "ok")
+        self.assertEqual((self.home / "steam-account").read_text().strip(), "RealName_1")  # mods won't ask again
+        run = self.depot_runs()[0]
+        for a in ["-qr", "-validate", "-remember-password", "976731", "976738", "976739", str(dest)]:
+            self.assertIn(a, run)
+
+    def test_game_download_uses_the_saved_login(self):
+        (self.home / "steam-account").write_text("RealName_1\n")
+        self.fake(["Logging 'RealName_1' into Steam3...", " Done!", "100.00% halo3/halo3.dll"])
+        rc, out = self.run_helper("game-download", str(self.home / "mcc"))
+        self.assertEqual(out[-1], "ok")
+        self.assertNotIn("qr-begin", out)
+        run = self.depot_runs()[0]
+        self.assertEqual(run[run.index("-username") + 1], "RealName_1")
+
+    def test_game_download_falls_back_to_qr_when_the_saved_login_expired(self):
+        (self.home / "steam-account").write_text("RealName_1\n")
+        self.depot_seq([(["Access token was rejected (AccessDenied)."], 1),
+                        ([*QR, SUCCESS, "Got 1 licenses for account!", "100.00% halo3/halo3.dll"], 0)])
+        rc, out = self.run_helper("game-download", str(self.home / "mcc"))
+        self.assertEqual(out[-1], "ok", out)
+        self.assertIn("qr-begin", out)
+        self.assertEqual(len(self.depot_runs()), 2)
+        self.assertIn("-qr", self.depot_runs()[1])
+
+    def test_game_download_without_mcc_says_so_plainly(self):
+        self.fake([*QR, SUCCESS, "Got 3 licenses for account!", "App 976730 (Halo) is not available from this account."],
+                  rc=1)
+        rc, out = self.run_helper("game-download", str(self.home / "mcc"))
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(out[-1], "error: This Steam account doesn't own Halo: The Master Chief Collection.")
+
+    def test_game_download_connection_failure(self):
+        self.fake(["Connecting to Steam3...", "Could not connect to Steam after 10 tries"], rc=1)
+        rc, out = self.run_helper("game-download", str(self.home / "mcc"))
+        self.assertEqual(out[-1], "error: Couldn't reach Steam. Check your internet connection and try again.")
+
     def test_no_setup_command(self):
         rc, out = self.run_helper("setup")
         self.assertNotEqual(rc, 0)

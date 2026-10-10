@@ -133,3 +133,76 @@ func modNotifications(before: [ModStatus], after: [ModStatus]) -> [(title: Strin
         }
     }
 }
+
+// MARK: - setup and upgrade
+
+/// What the window opens as.
+enum LaunchMode: Equatable {
+    case setup      // nothing installed: install everything
+    case upgrade    // a 1.0 install (no version file): one-time upgrade
+    case handOff    // the DMG copy opened while an up-to-date install exists: open the installed app instead
+    case launcher   // the installed app: updates, Steam, Play
+}
+
+func launchMode(home: URL, isInstalledApp: Bool, installedAppExists: Bool) -> LaunchMode {
+    let fm = FileManager.default
+    let game = home.appendingPathComponent("game").path
+    let wine = home.appendingPathComponent("wine").path
+    guard fm.fileExists(atPath: game), fm.fileExists(atPath: wine) else { return .setup }
+    if !fm.fileExists(atPath: home.appendingPathComponent("version").path) { return .upgrade }
+    if !isInstalledApp, installedAppExists { return .handOff }
+    return .launcher
+}
+
+/// One line of install.sh output in GUI mode.
+enum SetupEvent: Equatable {
+    case step(String), progress(Double), error(String), steam(SteamEvent), other
+
+    init(line: String) {
+        let plain = line.replacingOccurrences(of: "\u{1B}\\[[0-9;]*m", with: "", options: .regularExpression)
+        if plain.hasPrefix("==> ") { self = .step(String(plain.dropFirst(4))) }
+        else if plain.hasPrefix("progress: "), let v = Double(plain.dropFirst(10)) { self = .progress(min(max(v, 0), 100) / 100) }
+        else if plain.hasPrefix("error: ") { self = .error(String(plain.dropFirst(7))) }
+        else if plain == "qr-begin" || plain == "qr-end" || plain.hasPrefix("qr: ") { self = .steam(SteamEvent(line: plain)) }
+        else { self = .other }
+    }
+}
+
+/// install.sh's step headings, said plainly (nil: a step not worth showing on its own).
+func friendlyStep(_ heading: String) -> String? {
+    let table: [(String, String?)] = [
+        ("Project Reclaimer Mac Port", nil),
+        ("Installing Rosetta", "Installing Rosetta (Apple's Intel translator)"),
+        ("Wine", "Getting the Windows compatibility layer"),
+        ("Menu library", "Getting the menu graphics library"),
+        ("Game scripts", "Setting up the helper scripts"),
+        ("Project Reclaimer (latest", "Downloading Project Reclaimer"),
+        ("Windows environment", "Preparing the Windows environment"),
+        ("DepotDownloader", "Getting the Steam downloader"),
+        ("Halo 3 game files", "Downloading Halo 3 from your Steam account"),
+        ("Local network addresses", "Setting up the network (asks for your Mac password)"),
+        ("Tuned graphics settings", "Choosing graphics settings for your Mac"),
+        ("Launcher app", "Adding Project Reclaimer to Applications"),
+        ("Done", nil), ("Updated to", nil),
+    ]
+    return table.first { heading.hasPrefix($0.0) }.map { $0.1 } ?? heading
+}
+
+/// "About 12 minutes left" from how fast a download has been going.
+struct RateEstimator {
+    private var start: (time: Date, fraction: Double)?
+
+    mutating func remaining(fraction: Double, now: Date = Date()) -> String? {
+        guard let s = start else { start = (now, fraction); return nil }
+        let done = fraction - s.fraction, elapsed = now.timeIntervalSince(s.time)
+        guard done > 0.002, elapsed > 5 else { return nil }
+        let left = (1 - fraction) * elapsed / done
+        switch left {
+        case ..<90: return "About a minute left"
+        case ..<3600: return "About \(Int((left / 60).rounded())) minutes left"
+        default:
+            let h = left / 3600
+            return h < 1.5 ? "About an hour left" : "About \(Int(h.rounded())) hours left"
+        }
+    }
+}

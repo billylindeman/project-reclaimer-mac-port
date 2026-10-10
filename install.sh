@@ -10,6 +10,8 @@
 #   RECLAIMER_UPDATE=1          update an existing install without questions (run by the launcher's updater.py):
 #                               admin steps use macOS's password dialog instead of sudo
 #   RECLAIMER_RESET_GRAPHICS=1  put back the tuned graphics settings (otherwise only a fresh install gets them)
+#   RECLAIMER_GUI=1             run by the launcher window's Setup/Upgrade: no Terminal questions, the macOS password
+#                               dialog for admin steps, the Steam QR code and download progress for the window
 set -euo pipefail
 
 REPO_RAW=${RECLAIMER_REPO_RAW:-https://raw.githubusercontent.com/mattromano/project-reclaimer-mac-port/main}
@@ -27,14 +29,19 @@ MOLTENVK_PKG="MoltenVK-macos-1.4.2.tar|https://github.com/KhronosGroup/MoltenVK/
 MESA_PKG="mesa3d-26.2.4-release-msvc.7z|https://github.com/pal1000/mesa-dist-win/releases/download/26.2.4/mesa3d-26.2.4-release-msvc.7z|351fc8c8b695878ffb3eaa044b3ead08672a48b1a045e3c3e3975811df0f6695"
 DEPOT_PKG="DepotDownloader-macos-arm64.zip|https://github.com/SteamRE/DepotDownloader/releases/download/DepotDownloader_3.4.0/DepotDownloader-macos-arm64.zip|60e80c7c496f3f9a079cd3c62036b35d088c27bc0149baf38f009eb57a52f6a5"
 SPINFIX_SHA=0ec56a555b7b420c381f7cf5010719c86c3626c3c99efcb376981089f5d4f847  # spinfix/d3d11.dll (built from spinfix/spinfix.c)
-LAUNCHER_SHA=350513f295896f3223985ead01fb15843e75ee09d645748952fa550a68c58dde  # launcher/ProjectReclaimer (built by scripts/make_launcher.sh)
+LAUNCHER_SHA=60a9026dac7f53cd09bee0e4ebb46550caeee1f6bdef5d67be403a7fe6a1d80d  # launcher/ProjectReclaimer (built by scripts/make_launcher.sh)
 UPDATE=${RECLAIMER_UPDATE:-}
+GUI=${RECLAIMER_GUI:-}
 # give up on a stalled connection instead of hanging (the launcher waits for this when updating)
 CURL_LIMITS="--connect-timeout 20 --speed-limit 1024 --speed-time 60"
 
 bold() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 note() { printf '    %s\n' "$*"; }
-die() { printf '\n\033[31mError: %s\033[0m\n' "$*" >&2; exit 1; }
+die() {
+  printf '\n\033[31mError: %s\033[0m\n' "$*" >&2
+  [ -n "$GUI" ] && printf 'error: %s\n' "$*"  # (the window shows this line)
+  exit 1
+}
 
 fetch() {  # fetch "name|url|sha256" -> path of the verified file in $CACHE
   local name=${1%%|*} rest=${1#*|}; local url=${rest%%|*} sum=${rest##*|} f="$CACHE/${1%%|*}"
@@ -52,8 +59,8 @@ script_file() {  # copy a file from this repo (local checkout or GitHub) to $2
   if [ -n "$here" ] && [ -f "$here/$1" ]; then cp "$here/$1" "$2"; else curl -fsSL $CURL_LIMITS "$REPO_RAW/$1" -o "$2"; fi
 }
 
-as_admin() {  # as_admin "<shell command>": sudo in Terminal; macOS's password dialog when updating from the launcher
-  if [ -n "$UPDATE" ]; then
+as_admin() {  # as_admin "<shell command>": sudo in Terminal; macOS's password dialog when run by the launcher
+  if [ -n "$UPDATE" ] || [ -n "$GUI" ]; then
     local cmd=${1//\\/\\\\}; cmd=${cmd//\"/\\\"}
     /usr/bin/osascript -e "do shell script \"$cmd\" with prompt \"Project Reclaimer is updating its network settings.\" with administrator privileges" >/dev/null
   else
@@ -89,7 +96,11 @@ mkdir -p "$BASE"/{game,tools,logs} "$CACHE"
 
 if ! /usr/bin/pgrep -q oahd; then
   bold "Installing Rosetta 2 (runs Intel Windows code on Apple Silicon)"
-  softwareupdate --install-rosetta --agree-to-license || die "Rosetta install failed."
+  if [ -n "$GUI" ]; then
+    as_admin "softwareupdate --install-rosetta --agree-to-license" || die "Rosetta (Apple's Intel translator) didn't install."
+  else
+    softwareupdate --install-rosetta --agree-to-license || die "Rosetta install failed."
+  fi
 fi
 
 bold "Wine (Gcenx Wine Staging 11.18) with MoltenVK 1.4.2"
@@ -118,8 +129,11 @@ fi
 note "ok"
 
 bold "Game scripts and Workshop mod helper"
-for f in run.sh launch.sh workshop_helper.py presets.py updater.py; do script_file "scripts/$f" "$BASE/game/$f"; done
-chmod +x "$BASE/game/run.sh" "$BASE/game/launch.sh" "$BASE/game/workshop_helper.py" "$BASE/game/updater.py"
+# (the network files are kept here too, so the window's network fix can reinstall the startup task)
+for f in run.sh launch.sh workshop_helper.py presets.py updater.py tools.py reclaimer-loopback.sh \
+         local.projectreclaimer.loopback.plist; do script_file "scripts/$f" "$BASE/game/$f"; done
+chmod +x "$BASE/game/run.sh" "$BASE/game/launch.sh" "$BASE/game/workshop_helper.py" "$BASE/game/updater.py" \
+  "$BASE/game/tools.py"
 note "ok"
 
 bold "Project Reclaimer (latest release, checksum-verified)"
@@ -167,6 +181,11 @@ elif [ -n "$UPDATE" ]; then
 elif [ -n "${RECLAIMER_MCC_FROM:-}" ]; then
   mkdir -p "$(dirname "$MCC_DIR")"; cp -cR "$RECLAIMER_MCC_FROM" "$MCC_DIR" 2>/dev/null || cp -R "$RECLAIMER_MCC_FROM" "$MCC_DIR"
   note "copied from $RECLAIMER_MCC_FROM"
+elif [ -n "$GUI" ]; then
+  # the window shows the QR code and a progress bar; the account name is saved, so mods never ask to sign in
+  RECLAIMER_HOME="$BASE" /usr/bin/python3 -I "$BASE/game/workshop_helper.py" game-download "$MCC_DIR" 2>>"$BASE/logs/launcher.log" ||
+    exit 1  # (it printed the reason)
+  [ -f "$MCC_DIR/halo3/halo3.dll" ] || die "Halo 3's files are missing after the download. Try again to resume."
 else
   note "You need to own Halo: The Master Chief Collection on Steam."
   note "A QR code will appear: open the Steam app on your phone > Steam Guard / sign-in QR and scan it."
@@ -223,10 +242,11 @@ else script_file VERSION "$CACHE/VERSION"; fi
 rm -rf "$CACHE/x64" "$CACHE/dxvk-macOS-async-v1.10.3-20230507-repack" "$CACHE/MoltenVK" "$CACHE/spinfix-d3d11.dll"
 # last: the launcher compares this with GitHub's VERSION, so a failed update is tried again next launch
 mv "$CACHE/VERSION" "$BASE/version"
+# the downloaded archives (~1 GB) aren't needed any more, unless they're a cache the caller asked to keep
+[ -z "${RECLAIMER_CACHE:-}" ] && rm -rf "$CACHE"
 [ -n "$UPDATE" ] && { bold "Updated to $(cat "$BASE/version")"; exit 0; }
 
 bold "Done"
 note "Open \"Project Reclaimer\" from Spotlight, Launchpad or ~/Applications."
 note "It keeps itself and the game up to date, and signs you in to Steam for Workshop mods with a QR code."
 note "The first match builds a Forge cache (~1 min)."
-note "You can delete $CACHE to free ~1 GB."
