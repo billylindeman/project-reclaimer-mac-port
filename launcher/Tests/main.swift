@@ -156,5 +156,48 @@ try? "0.9.11\n".write(to: gd.appendingPathComponent("chosen-version"), atomicall
 check(installedVersion(gameDir: gd) == "0.9.11", "chosen version")
 try? fm.removeItem(at: gd)
 
+// gamepads: the "Force XInput" preference, written into the prefix's registry before the game starts
+check(defaultForceXinput(vid: 0x045e) == false, "Xbox pads: Wine needs no override")
+check(defaultForceXinput(vid: 0x057e) == true, "other pads forced to XInput by default")
+check(wineBusOverrideKey(vid: 0x57e, pid: 0x2009) == "057E/2009", "override key format")
+
+// a real prefix's registry (as `wine reg add` wrote it: ControlSet001, lowercase winebus, a #time stamp)
+let reg = """
+#arch win64
+
+[System\\\\ControlSet001\\\\Services\\\\Eventlog\\\\System\\\\Winebus] 1791000000
+"Type"=dword:00000001
+
+[System\\\\ControlSet001\\\\Services\\\\winebus\\\\Devices\\\\057E/2009] 1791682334
+#time=1dd592058168e64
+"Hidraw"=dword:00000000
+
+"""
+let pro = "057E/2009"
+// checked: the section is kept, freshly written (no stale #time stamp) and idempotent
+let on = applyWineBusOverrides(reg, enabled: [pro], now: 1791682334)
+check(on.contains("[System\\\\ControlSet001\\\\Services\\\\winebus\\\\Devices\\\\057E/2009] 1791682334\n\"Hidraw\"=dword:00000000\n"), "checked pad keeps its override")
+check(!on.contains("#time"), "stale timestamp dropped")
+check(on.contains("[System\\\\ControlSet001\\\\Services\\\\Eventlog\\\\System\\\\Winebus] 1791000000\n\"Type\"=dword:00000001"), "unrelated sections untouched")
+check(applyWineBusOverrides(on, enabled: [pro], now: 1791682334) == on, "idempotent")
+// unchecked: the section is removed (not set to Hidraw=1, which would break pads that default to the SDL path)
+let off = applyWineBusOverrides(reg, enabled: [], now: 1791682334)
+check(!off.contains("winebus\\\\Devices"), "unchecked pad loses its section")
+check(off.hasPrefix("#arch win64\n\n[System\\\\ControlSet001\\\\Services\\\\Eventlog"), "preamble and other sections kept")
+// a pad never configured before gets a section appended
+let fresh = """
+#arch win64
+
+[System\\\\ControlSet001\\\\Services\\\\Eventlog\\\\System\\\\Winebus] 1791000000
+"Type"=dword:00000001
+
+"""
+let added = applyWineBusOverrides(fresh, enabled: [pro], now: 1791682334)
+check(added.hasSuffix("[System\\\\ControlSet001\\\\Services\\\\winebus\\\\Devices\\\\057E/2009] 1791682334\n\"Hidraw\"=dword:00000000"), "override appended at the end")
+check(applyWineBusOverrides(added, enabled: [pro], now: 1791682334) == added, "appending is idempotent too")
+// key spellings that shouldn't match: the backslash form from `reg add "...\057E\2009"` is never read by winebus
+let backslash = "[System\\\\ControlSet001\\\\Services\\\\winebus\\\\Devices\\\\057E\\\\2009] 1791682334\n\"Hidraw\"=dword:00000000\n"
+check(applyWineBusOverrides(backslash, enabled: [pro], now: 1791682334).contains("Devices\\\\057E/2009"), "backslash section left alone, a real one written")
+
 print(failures == 0 ? "All launcher tests passed" : "\(failures) launcher test(s) failed")
 exit(failures == 0 ? 0 : 1)

@@ -35,9 +35,19 @@ final class Launcher: ObservableObject {
     @Published var network: Step? { didSet { if network != oldValue, let n = network { log("network: \(n)") } } }
     @Published var notice: String?   // a plain-language note, e.g. after Tools stopped the game
     @Published var showTools = false
+    // gamepads plugged into the Mac (the "Force XInput" list); forceXinput holds the current pads' choices,
+    // xinputChoices remembers past choices (in UserDefaults) so a pad keeps its setting between sessions
+    @Published var gamepads: [GamepadInfo] = [] { didSet { if gamepads != oldValue { log("gamepads: \(gamepads.map(\.id))") } } }
+    @Published var forceXinput: [String: Bool] = [:]
+    private static let xinputDefaultsKey = "gamepad.forceXinput"
+    private var xinputChoices: [String: Bool] = {
+        (UserDefaults.standard.dictionary(forKey: xinputDefaultsKey) ?? [:])
+            .reduce(into: [String: Bool]()) { if let b = $1.value as? NSNumber { $0[$1.key] = b.boolValue } }
+    }()
     /// An older Project Reclaimer the player chose for servers that haven't updated (nil: the newest).
     @Published var chosenVersion: String? { didSet { if chosenVersion != oldValue { log("chosen version: \(chosenVersion ?? "newest")") } } }
     let tools = ToolsModel()
+    private let gamepadMonitor = GamepadMonitor()
     private var checkingCrash = false
 
     // a join that failed (logs/join-problem.json): what the window says about it, and the fix it offers
@@ -111,6 +121,13 @@ final class Launcher: ObservableObject {
         guard !didStart else { return }
         didStart = true
         log("started (home \(home.path))")
+        gamepadMonitor.onUpdate = { [self] list in
+            for pad in list where forceXinput[pad.id] == nil {
+                forceXinput[pad.id] = xinputChoices[pad.id] ?? defaultForceXinput(vid: pad.vid)
+            }
+            gamepads = list
+        }
+        gamepadMonitor.start()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
             MainActor.assumeIsolated { self.tick() }
         }
@@ -283,6 +300,43 @@ final class Launcher: ObservableObject {
     }
 
     // 4. play
+    /// A pad's "Force XInput" choice, remembered in UserDefaults between sessions.
+    func setForceXinput(_ on: Bool, for pad: GamepadInfo) {
+        forceXinput[pad.id] = on
+        xinputChoices[pad.id] = on
+        UserDefaults.standard.set(xinputChoices, forKey: Self.xinputDefaultsKey)
+        log("force xinput \(pad.id): \(on)")
+    }
+
+    /// Store the checked pads' preference in the Wine prefix's registry, where winebus reads it as Wine starts.
+    /// Editing system.reg is only safe while no wineserver runs (it flushes its own copy on exit), so this runs
+    /// right before the game starts, after any earlier session's server is told to quit.
+    private func applyGamepadOverrides() {
+        let enabled = Set(gamepads.filter { forceXinput[$0.id] == true }.map(\.id))
+        guard FileManager.default.fileExists(atPath: home.appendingPathComponent("prefix-wine/system.reg").path) else { return }
+        // a server from a just-ended session would otherwise overwrite the file with its in-memory registry
+        let server = home.appendingPathComponent("wine/Wine Staging.app/Contents/Resources/wine/bin/wineserver")
+        if FileManager.default.fileExists(atPath: server.path) {
+            let p = Process()
+            p.executableURL = server
+            p.arguments = ["-k"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run(); p.waitUntilExit()
+        }
+        let regURL = home.appendingPathComponent("prefix-wine/system.reg")
+        guard let reg = try? String(contentsOf: regURL, encoding: .utf8) else { return }
+        let updated = applyWineBusOverrides(reg, enabled: enabled)
+        guard updated != reg else { return }
+        do {
+            try updated.write(to: regURL, atomically: true, encoding: .utf8)
+            log("xinput overrides: \(enabled.sorted())")
+        } catch {
+            notice = "The controller setting couldn't be saved; the game starts anyway."
+            log("xinput override failed: \(error)")
+        }
+    }
+
     func play() {
         notice = nil
         joinTrouble = nil
@@ -297,6 +351,7 @@ final class Launcher: ObservableObject {
             }
         }
         gameError = nil
+        applyGamepadOverrides()
         playing = true
         playedAt = Date()
         gameGoneSince = nil

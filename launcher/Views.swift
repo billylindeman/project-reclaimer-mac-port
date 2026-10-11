@@ -129,6 +129,38 @@ struct ModRow: View {
     }
 }
 
+/// The Mac's gamepads, each with its "Force XInput" choice: Wine only shows Microsoft pads to the game's XInput
+/// by itself; for the rest the choice is stored in the Wine prefix right before the game starts.
+struct ControllersCard: View {
+    @ObservedObject var m: Launcher
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Controllers").font(.headline)
+            ForEach(m.gamepads) { pad in
+                HStack(spacing: 10) {
+                    Image(systemName: "gamecontroller").foregroundStyle(accent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(pad.name).font(.callout.weight(.medium))
+                        Text(pad.bluetooth ? "Bluetooth" : "USB").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Toggle("Force XInput", isOn: Binding(
+                        get: { m.forceXinput[pad.id] ?? defaultForceXinput(vid: pad.vid) },
+                        set: { m.setForceXinput($0, for: pad) }))
+                        .toggleStyle(.switch)
+                        .disabled(m.playing)
+                        .help(m.playing ? "Quit the game to change this" : "Lets the game see this controller")
+                }
+            }
+            Text("Takes effect the next time the game starts.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 14).fill(.background.secondary))
+    }
+}
+
 /// Always clearly green when it can be pressed, also while the window isn't focused (where macOS greys out
 /// prominent buttons); plainly grey with the reason as its label when it can't.
 struct PlayButtonStyle: ButtonStyle {
@@ -228,6 +260,8 @@ struct ContentView: View {
             .background(RoundedRectangle(cornerRadius: 14).fill(.background.secondary))
 
             if let j = m.joinTrouble { JoinTroubleCard(m: m, j: j) }
+
+            if !m.gamepads.isEmpty { ControllersCard(m: m) }
 
             if m.playing {
                 Label {

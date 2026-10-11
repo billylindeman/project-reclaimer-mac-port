@@ -215,6 +215,80 @@ struct RateEstimator {
     }
 }
 
+// MARK: - gamepads (Wine's XInput)
+
+/// Wine recognizes Microsoft pads by itself; every other pad needs the "Force XInput" preference stored in the
+/// prefix's registry before the game starts (Launcher.applyGamepadOverrides).
+func defaultForceXinput(vid: Int) -> Bool { vid != 0x045e }
+
+/// The subkey name Wine's winebus keys a gamepad's settings by. Forward slash on purpose: winebus parses these
+/// names with swscanf("%04x/%04x"), so a backslash name ("057E\\2009") is never read.
+func wineBusOverrideKey(vid: Int, pid: Int) -> String {
+    String(format: "%04X/%04X", vid, pid)
+}
+
+/// One section of a Wine registry file: the "[path] timestamp" header line and the lines after it, up to (but not
+/// including) the next section. The trailing blank line that separates sections belongs to the one before it.
+private struct RegSection {
+    var header: String
+    var id: String?     // the winebus device key ("057E/2009") when this is a gamepad override section
+    var body: [String]
+}
+
+/// Writes "Force XInput" choices into a Wine prefix's system.reg text. A checked pad gets "Hidraw"=dword:0, which
+/// makes winebus expose it through its SDL gamepad path — the one Wine's XInput reads; a game that only asks XInput
+/// then finds the pad. An unchecked pad loses its section altogether: writing "Hidraw"=1 instead would wrongly
+/// force the raw-HID path on pads whose default is already the SDL path. Only safe while no wineserver runs.
+func applyWineBusOverrides(_ reg: String, enabled: Set<String>, now: Double = Date().timeIntervalSince1970) -> String {
+    let deviceKeys = "services\\\\winebus\\\\devices\\\\"
+
+    func deviceID(of header: String) -> String? {
+        guard header.hasPrefix("["), let close = header.firstIndex(of: "]") else { return nil }
+        let key = header[header.index(after: header.startIndex)..<close].lowercased()
+        guard let r = key.range(of: deviceKeys) else { return nil }
+        let id = String(key[r.upperBound...]).uppercased()
+        let parts = id.split(separator: "/")
+        guard parts.count == 2, parts.allSatisfy({ $0.count == 4 && $0.allSatisfy(\.isHexDigit) }) else { return nil }
+        return id
+    }
+
+    var out: [String] = []
+    var section: RegSection?
+    var seen = Set<String>()
+
+    func flush() {
+        guard let s = section else { return }
+        section = nil
+        guard let id = s.id else { out.append(s.header); out += s.body; return }  // not ours: keep untouched
+        seen.insert(id)
+        guard enabled.contains(id) else { return }              // unchecked: drop the whole section
+        out.append("\(s.header.prefix(through: s.header.firstIndex(of: "]")!)) \(Int(now))")
+        out.append("\"Hidraw\"=dword:00000000")
+        if s.body.last == "" { out.append("") }  // keep the blank line ending the section, if it had one
+    }
+
+    for line in reg.split(separator: "\n", omittingEmptySubsequences: false) {
+        if line.hasPrefix("["), line.contains("]") {
+            flush()
+            section = RegSection(header: String(line), id: deviceID(of: String(line)), body: [])
+        } else if section != nil {
+            section!.body.append(String(line))
+        } else {
+            out.append(String(line))  // the "#arch" preamble before the first section
+        }
+    }
+    flush()
+
+    // pads with no section yet (and none written by `wine reg add` before, which is what created the ControlSet001
+    // spelling) get one appended; the same key as seen sections gets is handled above
+    for id in enabled.subtracting(seen).sorted() {
+        if let last = out.last, !last.isEmpty { out.append("") }
+        out.append("[System\\\\ControlSet001\\\\Services\\\\winebus\\\\Devices\\\\" + id + "] " + String(Int(now)))
+        out.append("\"Hidraw\"=dword:00000000")
+    }
+    return out.joined(separator: "\n")
+}
+
 // MARK: - game versions
 
 /// "today", "yesterday", "3 days ago" for a release date like "2026-10-09" (UTC, as GitHub gives it).

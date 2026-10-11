@@ -247,6 +247,12 @@ func renderStates(to dir: URL) {
             $0.update = .done("Up to date"); $0.steam = .done("Signed in as player123")
             $0.gameError = "The graphics card stopped responding, so the game closed. This happens now and then on heavy modded maps. Press Play to start again; if it keeps happening, lower Settings > Render resolution in the game."
         }),
+        ("14-controllers", {
+            $0.update = .done("Up to date"); $0.steam = .done("Signed in as player123")
+            $0.gamepads = [GamepadInfo(id: "057E/2009", name: "Pro Controller", vid: 0x057e, pid: 0x2009, bluetooth: false),
+                           GamepadInfo(id: "045E/028E", name: "Xbox 360 Controller", vid: 0x045e, pid: 0x028e, bluetooth: true)]
+            $0.forceXinput = ["057E/2009": true, "045E/028E": false]
+        }),
         ("8-bad-link", {
             $0.update = .done("Up to date"); $0.steam = .done("Signed in as player123")
             $0.link = "Warlock"; $0.linkError = "Paste a Steam Workshop link (it has “?id=” in it)."
