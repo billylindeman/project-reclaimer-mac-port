@@ -429,6 +429,34 @@ class HelperTest(unittest.TestCase):
         rc, out = self.run_helper("game-download", str(self.home / "mcc"))
         self.assertEqual(out[-1], "error: Couldn't reach Steam. Check your internet connection and try again.")
 
+    # ---- failed joins (the window offers to switch versions and rejoin) -----------------------------------------
+    def watch_log(self, lines):
+        h = self.load()
+        log = self.home / "logs" / "client.log"
+        log.write_text("\n".join(lines) + "\n")
+        with mock.patch.object(h, "LOG", log), mock.patch.object(h, "notify"), \
+                mock.patch.object(h, "game_running", return_value=False), mock.patch.object(h, "GAME_GRACE", 0.5):
+            h.watch()
+        path = self.home / "logs" / "join-problem.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def test_join_refused_for_version_is_recorded_with_the_servers_version(self):
+        p = self.watch_log(["A join link asks to join 72.222.230.115:49176.",
+                            "Joining 72.222.230.115:49176 from a join link.",
+                            "Joining server failed: This server runs Project Reclaimer 0.9.7, older than your 0.9.13: "
+                            "its host needs to update it."])
+        self.assertEqual((p["address"], p["server_version"], p["mine"], p["kind"]),
+                         ("72.222.230.115:49176", "0.9.7", "0.9.13", "version"))
+
+    def test_join_timeout_is_recorded_without_a_version(self):
+        p = self.watch_log(["Joining 75.98.127.226:49241 from the server browser.",
+                            "Public join timed out; check the server address and forwarded ports"])
+        self.assertEqual((p["address"], p["server_version"], p["kind"]), ("75.98.127.226:49241", None, "no-answer"))
+
+    def test_a_good_join_records_nothing(self):
+        self.assertIsNone(self.watch_log(["Joining 1.2.3.4:5 from a join link.",
+                                          "Joining the game in progress: the map is ready after 5.0 s."]))
+
     def test_no_setup_command(self):
         rc, out = self.run_helper("setup")
         self.assertNotEqual(rc, 0)

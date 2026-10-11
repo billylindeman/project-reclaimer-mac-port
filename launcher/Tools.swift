@@ -181,7 +181,7 @@ struct ToolsSheet: View {
                             .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         if launcher.chosenVersion != nil {
                             tool("Back to the newest version", "Switch Back",
-                                 "For up-to-date servers (most of them). Takes effect the next time you press Play.") {
+                                 "For up-to-date servers (most of them). Takes effect the next time you press Play; opening Project Reclaimer again does it too.") {
                                 t.busy = "Switching back…"
                                 launcher.useVersion("newest") { e in
                                     t.busy = nil
@@ -190,7 +190,7 @@ struct ToolsSheet: View {
                             }
                         }
                         tool("Play an older version", t.showVersions ? "Hide" : "Choose…",
-                             "For a server that says it runs an older version. Try the version from a day or two ago; each is a ~36 MB download the first time.") {
+                             "Usually not needed: when a join fails because of the version, the main window offers to switch and rejoin. Each version is a ~36 MB download the first time, and lasts until you close Project Reclaimer.") {
                             t.showVersions.toggle()
                             if t.showVersions, t.versions == nil { t.loadVersions() }
                         }

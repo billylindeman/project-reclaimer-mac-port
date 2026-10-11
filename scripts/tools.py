@@ -12,6 +12,8 @@
   forget-steam       forget the saved Steam account (the window then shows a QR code)
   repair             re-check Halo 3's files against Steam (QR codes and progress as workshop_helper game-download)
   uninstall          remove the app, the install folder and the network startup task
+  server-version <host:port>   "<version> <name>" of the Project Reclaimer a server runs, or "unreachable"
+  join <host:port>   join a server in the running game (hands it a join link, as a link in a browser would)
 
 Each prints "ok" (or its result) last, or "error: <plain reason>". RECLAIMER_TOOLS_DRYRUN=1 prints admin commands
 ("dry-run admin: ...") instead of asking for the password, for tests.
@@ -38,6 +40,7 @@ MCC_DIR = STEAMAPPS / "common" / "Halo The Master Chief Collection"
 APP = Path(os.environ.get("RECLAIMER_APP_PATH")
            or Path(os.environ.get("RECLAIMER_APPS_DIR", HOME / "Applications")) / "Project Reclaimer.app")
 DESKTOP = Path(os.environ.get("RECLAIMER_DESKTOP", HOME / "Desktop"))
+CLIENT_EXE = re.compile(r"^project-reclaimer-v[0-9.]+\.exe$")
 GAME_PROCESS = os.environ.get("RECLAIMER_GAME_PROCESS", r"project-reclaimer-v[0-9.]+\.exe game-client")
 DAEMON = "local.projectreclaimer.loopback"
 DAEMON_PLIST = f"/Library/LaunchDaemons/{DAEMON}.plist"
@@ -255,6 +258,69 @@ def repair():
     return helper().game_download(str(MCC_DIR))
 
 
+ADDRESS = re.compile(r"[A-Za-z0-9.-]+:\d{1,5}")
+
+
+def game_env():
+    """Wine settings as run.sh uses them, for asking the game something without opening it."""
+    return dict(os.environ, WINEPREFIX=str(BASE / "prefix-wine"), WINEDEBUG="-all", MVK_CONFIG_LOG_LEVEL="0",
+                WINEDLLOVERRIDES="opengl32=n,b;xaudio2_9=d;d3d11,d3d10core=n,b")
+
+
+WINE = BASE / "wine" / "Wine Staging.app" / "Contents" / "Resources" / "wine" / "bin" / "wine"
+
+
+def game_exe():
+    """(folder, exe name) the game starts from: the chosen older version, else the newest (as run.sh decides)."""
+    try:
+        chosen = (GAME / "chosen-version").read_text().strip()
+    except OSError:
+        chosen = ""
+    if chosen and (GAME / "versions" / f"project-reclaimer-v{chosen}.exe").exists():
+        return GAME / "versions", f"project-reclaimer-v{chosen}.exe"
+    exes = [e for e in GAME.glob("project-reclaimer-v*.exe") if CLIENT_EXE.match(e.name)]
+    if not exes:
+        return None, None
+    newest = max(exes, key=lambda p: [int(x) for x in re.findall(r"\d+", p.name)])
+    return GAME, newest.name
+
+
+def server_version(address):
+    if not ADDRESS.fullmatch(address):
+        return "error: That isn't a server address."
+    folder, exe = game_exe()
+    if not exe:
+        return "error: Project Reclaimer isn't installed."
+    try:
+        p = subprocess.run([str(WINE), exe, "server-status", address], cwd=folder, env=game_env(),
+                           capture_output=True, text=True, timeout=40)
+    except subprocess.TimeoutExpired:
+        return "unreachable"
+    text = p.stdout
+    start = text.find("{")
+    try:
+        info = json.loads(text[start:text.rindex("}") + 1]) if start >= 0 else {}
+    except ValueError:
+        info = {}
+    version = str(info.get("version") or "")
+    if not re.fullmatch(r"\d+(\.\d+){1,3}", version):
+        return "unreachable"
+    return f"{version} {info.get('name') or address}".strip()
+
+
+def join(address):
+    if not ADDRESS.fullmatch(address):
+        return "error: That isn't a server address."
+    folder, exe = game_exe()
+    if not exe:
+        return "error: Project Reclaimer isn't installed."
+    # a second start with only the link hands it to the running game and exits (other arguments make it ignore it)
+    subprocess.Popen([str(WINE), exe, f"reclaimer://join?server={address}"], cwd=folder, env=game_env(),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    return "ok"
+
+
 def uninstall():
     if not (BASE / "game").is_dir() or not (BASE / "prefix-wine").is_dir():
         return f"error: {BASE} doesn't look like a Project Reclaimer install, so nothing was removed."
@@ -282,6 +348,10 @@ def main(argv):
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(1))
     if len(argv) == 3 and argv[1] == "remove-mod":
         result = remove_mod(argv[2])
+    elif len(argv) == 3 and argv[1] == "server-version":
+        result = server_version(argv[2])
+    elif len(argv) == 3 and argv[1] == "join":
+        result = join(argv[2])
     elif len(argv) == 2 and argv[1] == "net-check":
         result = net_check()
         for _ in range(8):  # right after login the startup task may still be adding its ~1,300 addresses

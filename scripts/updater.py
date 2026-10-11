@@ -281,6 +281,10 @@ def main(argv):
             fcntl.flock(lock, fcntl.LOCK_EX)
     say("status: Checking for updates…")
     results, errors, offline = {}, [], None
+    if argv[1] == "run":
+        # an older version is for this session only (Tools, or the window's "switch and rejoin"): opening the app
+        # again goes back to the newest, so nobody stays stuck on an old one
+        CHOSEN.unlink(missing_ok=True)
     steps = [update_game] if argv[1] == "game" else [update_port, update_game]
     for step in steps:
         try:

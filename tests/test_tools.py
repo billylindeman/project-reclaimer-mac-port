@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -180,6 +181,50 @@ class ToolsTest(unittest.TestCase):
             self.assertEqual(self.run_tool("reset-graphics")[1][-1], "error: Quit the game first.")
         finally:
             game.kill()
+
+    # ---- server versions and rejoining ----
+    def fake_wine(self, script):
+        wine = self.home / "wine/Wine Staging.app/Contents/Resources/wine/bin/wine"
+        wine.parent.mkdir(parents=True, exist_ok=True)
+        wine.write_text("#!/bin/sh\n" + script + "\n")
+        wine.chmod(0o755)
+        (self.home / "game" / "project-reclaimer-v0.9.13.exe").write_bytes(b"MZ")
+
+    def test_server_version(self):
+        self.fake_wine('echo "Server queries: version 0.9.13"; echo \'{"address": "1.2.3.4:5", "name": "Star Wars", '
+                       '"version": "0.9.11"}\'')
+        self.assertEqual(self.run_tool("server-version", "1.2.3.4:5")[1][-1], "0.9.11 Star Wars")
+
+    def test_server_version_of_a_server_that_doesnt_answer(self):
+        self.fake_wine('echo "Error: Connecting to game server (UDP/QUIC): no response within 2500 ms"; exit 1')
+        self.assertEqual(self.run_tool("server-version", "1.2.3.4:5")[1][-1], "unreachable")
+
+    def test_server_version_rejects_odd_addresses(self):
+        self.assertTrue(self.run_tool("server-version", "1.2.3.4; rm -rf /")[1][-1].startswith("error: "))
+
+    def joined_with(self):
+        record = self.tmp / "joined"
+        for _ in range(50):
+            if record.exists():
+                return record.read_text().strip()
+            time.sleep(0.1)
+        return ""
+
+    def test_join_hands_just_the_link_to_the_running_game(self):
+        self.fake_wine(f'echo "$(pwd) $@" > {self.tmp / "joined"}')
+        self.assertEqual(self.run_tool("join", "75.98.127.226:49241")[1][-1], "ok")
+        # (the game ignores a link given together with other arguments)
+        self.assertEqual(self.joined_with(),
+                         f"{(self.home / 'game').resolve()} project-reclaimer-v0.9.13.exe reclaimer://join?server=75.98.127.226:49241")
+
+    def test_join_uses_the_chosen_older_version(self):
+        self.fake_wine(f'echo "$(pwd) $@" > {self.tmp / "joined"}')
+        (self.home / "game" / "versions").mkdir()
+        (self.home / "game" / "versions" / "project-reclaimer-v0.9.11.exe").write_bytes(b"MZ")
+        (self.home / "game" / "chosen-version").write_text("0.9.11\n")
+        self.run_tool("join", "1.2.3.4:5")
+        self.assertEqual(self.joined_with(),
+                         f"{(self.home / 'game' / 'versions').resolve()} project-reclaimer-v0.9.11.exe reclaimer://join?server=1.2.3.4:5")
 
     # ---- force quit / uninstall --------------------------------------------------------------------------------
     def test_force_quit_stops_the_game(self):

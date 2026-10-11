@@ -40,6 +40,19 @@ final class Launcher: ObservableObject {
     let tools = ToolsModel()
     private var checkingCrash = false
 
+    // a join that failed (logs/join-problem.json): what the window says about it, and the fix it offers
+    struct JoinTrouble: Equatable {
+        var address: String?
+        var serverName: String?
+        var serverVersion: String?   // nil: still asking the server, or it didn't answer
+        var mine: String?
+        var unreachable = false
+        var asking = false
+    }
+    @Published var joinTrouble: JoinTrouble? { didSet { if joinTrouble != oldValue, let j = joinTrouble { log("join trouble: \(j)") } } }
+    private var lastJoinProblem = Date().timeIntervalSince1970
+    private var pendingJoin: String?   // rejoin this server once the restarted game reaches its menu
+
     private let started = Date()
     private var running: [LineProcess] = []
     private var updater: LineProcess?
@@ -272,6 +285,7 @@ final class Launcher: ObservableObject {
     // 4. play
     func play() {
         notice = nil
+        joinTrouble = nil
         // asked once, on the first Play: mod downloads are announced with notifications while the game is in front
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
             let why = error.map { " (\($0.localizedDescription))" } ?? ""
@@ -315,6 +329,65 @@ final class Launcher: ObservableObject {
             updateProgress = nil
             if error != nil { update = previous }
             done(error)
+        }))
+    }
+
+    private func gameReachedMenu() -> Bool {
+        let url = home.appendingPathComponent("logs/client-wine.log")
+        // this launch's log only (launch.sh empties it at start): never the previous game's "menu ready" line
+        guard Date().timeIntervalSince(playedAt) > 5,
+              let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+              modified > playedAt else { return false }
+        let log = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        return log.contains("Menu loading screen finished")
+    }
+
+    /// A failed join the helper recorded: work out the server's version (asking it, when the game didn't say),
+    /// bring the window forward, and offer to switch versions and rejoin.
+    private func checkJoinProblem() {
+        let url = home.appendingPathComponent("logs/join-problem.json")
+        guard let data = try? Data(contentsOf: url), let p = try? JSONDecoder().decode(JoinProblem.self, from: data),
+              p.time > lastJoinProblem else { return }
+        lastJoinProblem = p.time
+        var trouble = JoinTrouble(address: p.address, serverVersion: p.server_version,
+                                  mine: p.mine ?? installedVersion(gameDir: gameDir))
+        NSApp.activate(ignoringOtherApps: true)  // (the player is at the game's menu: the fix needs one click here)
+        if trouble.serverVersion == nil, let address = p.address {
+            trouble.asking = true
+            joinTrouble = trouble
+            keep(python("tools.py", ["server-version", address], onLine: { [self] line in
+                guard var j = joinTrouble, j.address == address else { return }
+                j.asking = false
+                if line == "unreachable" || line.hasPrefix("error: ") { j.unreachable = true }
+                else {
+                    let parts = line.split(separator: " ", maxSplits: 1).map(String.init)
+                    j.serverVersion = parts.first
+                    j.serverName = parts.count > 1 ? parts[1] : nil
+                }
+                joinTrouble = j
+            }, onExit: { _ in }))
+        } else {
+            joinTrouble = trouble
+        }
+        notify("Couldn't join that server", "The Project Reclaimer window explains why and can fix it.")
+    }
+
+    /// Quit the game, switch to the server's version (or back to the newest), start again and rejoin.
+    func switchAndRejoin() {
+        guard let j = joinTrouble, let address = j.address, let server = j.serverVersion, let mine = j.mine else { return }
+        let target = switchTarget(server: server, mine: mine)
+        joinTrouble = nil
+        notice = target == "newest" ? "Switching back to the newest Project Reclaimer and rejoining…"
+                                    : "Switching to Project Reclaimer \(target) and rejoining…"
+        keep(python("tools.py", ["force-quit"], onLine: { _ in }, onExit: { [self] _ in
+            gameForceQuit()
+            notice = "Getting Project Reclaimer \(target == "newest" ? "(newest)" : target)…"
+            useVersion(target) { [self] error in
+                if let error { notice = nil; gameError = error; return }
+                pendingJoin = address
+                play()
+                notice = "Starting the game, then joining the server…"
+            }
         }))
     }
 
@@ -367,12 +440,14 @@ final class Launcher: ObservableObject {
     private let env = ProcessInfo.processInfo.environment
     private lazy var testAutoplay = env["RECLAIMER_TEST_AUTOPLAY"] == "1"
     private lazy var testGet = env["RECLAIMER_TEST_GET"]
+    private lazy var testSwitch = env["RECLAIMER_TEST_SWITCH"] == "1"
 
     private func tick() {
         ticks += 1
         running.removeAll { !$0.isRunning }
         if let id = testGet, case .done = steam { testGet = nil; link = id; getMod() }
         if testAutoplay, ready { testAutoplay = false; play() }
+        if testSwitch, let j = joinTrouble, j.serverVersion != nil, !j.asking { testSwitch = false; switchAndRejoin() }
         // a stuck update (it has its own network timeouts, so this is a last resort) never keeps Play off for good
         if let u = updater, Date().timeIntervalSince(started) > 600 {
             u.stop()
@@ -388,6 +463,12 @@ final class Launcher: ObservableObject {
                 if m.isDownloading, !helperRunning, now - m.time > 30 { m.state = "failed" }
                 return m
             }
+        checkJoinProblem()
+        if let address = pendingJoin, playing, gameReachedMenu() {
+            pendingJoin = nil
+            notice = "Joining the server…"
+            keep(python("tools.py", ["join", address], onLine: { _ in }, onExit: { _ in }))
+        }
         // the helper found no working Steam login (e.g. it expired mid-game): check it again, which shows the QR
         // code if it really is gone, then retry those mods once; not after the player chose Skip
         let needLogin = Set(mods.filter { $0.state == "login_needed" }.map(\.id)).subtracting(retried)

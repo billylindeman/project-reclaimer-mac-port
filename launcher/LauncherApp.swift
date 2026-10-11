@@ -342,6 +342,16 @@ func renderStates(to dir: URL) {
         .init(version: "0.9.11", date: String(yesterday), downloaded: true),
         .init(version: "0.9.10", date: String(yesterday), downloaded: false)])
     snapshot(ToolsSheet(launcher: v, t: v.tools), name: "32-tools-versions", to: dir)
+
+    // a failed join: older server, and a server that didn't answer
+    let jt = Launcher()
+    jt.logging = false
+    jt.update = .done("Up to date"); jt.steam = .done("Signed in as player123"); jt.playing = true
+    jt.joinTrouble = .init(address: "75.98.127.226:49241", serverName: "Official Star Wars 24/7 Server",
+                           serverVersion: "0.9.11", mine: "0.9.13")
+    snapshot(ContentView(m: jt), name: "33-join-older-server", to: dir)
+    jt.joinTrouble = .init(address: "108.28.165.49:49176", mine: "0.9.13", unreachable: true)
+    snapshot(ContentView(m: jt), name: "34-join-no-answer", to: dir)
 }
 
 @MainActor

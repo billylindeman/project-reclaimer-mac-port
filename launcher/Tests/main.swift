@@ -142,5 +142,19 @@ check(relativeDay("soon", now: noon) == "soon", "unparseable stays as it is")
 let listing = #"{"chosen": "0.9.11", "versions": [{"version": "0.9.12", "date": "2026-10-10", "downloaded": true}]}"#
 check((try? JSONDecoder().decode(GameVersions.self, from: Data(listing.utf8)))?.chosen == "0.9.11", "versions json")
 
+// failed joins
+check(switchTarget(server: "0.9.7", mine: "0.9.13") == "0.9.7", "older server: its version")
+check(switchTarget(server: "0.9.13", mine: "0.9.11") == "newest", "newer server: back to the newest")
+check(switchTarget(server: "0.9.10", mine: "0.9.9") == "newest", "numeric, not text, comparison")
+let gd = fm.temporaryDirectory.appendingPathComponent("launcher-gamedir-\(getpid())")
+try? fm.createDirectory(at: gd, withIntermediateDirectories: true)
+for n in ["project-reclaimer-v0.9.9.exe", "project-reclaimer-v0.9.13.exe", "project-reclaimer-dedicated-v0.9.13.exe"] {
+    fm.createFile(atPath: gd.appendingPathComponent(n).path, contents: Data())
+}
+check(installedVersion(gameDir: gd) == "0.9.13", "newest exe: \(installedVersion(gameDir: gd) ?? "-")")
+try? "0.9.11\n".write(to: gd.appendingPathComponent("chosen-version"), atomically: true, encoding: .utf8)
+check(installedVersion(gameDir: gd) == "0.9.11", "chosen version")
+try? fm.removeItem(at: gd)
+
 print(failures == 0 ? "All launcher tests passed" : "\(failures) launcher test(s) failed")
 exit(failures == 0 ? 0 : 1)

@@ -243,3 +243,32 @@ struct GameVersions: Decodable, Equatable {
     let chosen: String?
     let versions: [Release]
 }
+
+// MARK: - failed joins
+
+/// logs/join-problem.json, written by workshop_helper.py when a join fails.
+struct JoinProblem: Decodable, Equatable {
+    let address: String?
+    let server_version: String?
+    let mine: String?
+    let kind: String      // "version" (the game said which version the server runs) or "no-answer"
+    let time: Double
+}
+
+func versionParts(_ v: String) -> [Int] { v.split(separator: ".").map { Int($0) ?? 0 } }
+
+/// The version to switch to for a server: its own when it's older than ours, "newest" when it's newer.
+func switchTarget(server: String, mine: String) -> String {
+    versionParts(server).lexicographicallyPrecedes(versionParts(mine)) ? server : "newest"
+}
+
+/// The version a game folder starts: the chosen older one, else the newest exe there.
+func installedVersion(gameDir: URL) -> String? {
+    if let chosen = try? String(contentsOf: gameDir.appendingPathComponent("chosen-version"), encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines), !chosen.isEmpty { return chosen }
+    let names = (try? FileManager.default.contentsOfDirectory(atPath: gameDir.path)) ?? []
+    return names.compactMap { n -> String? in
+        guard n.hasPrefix("project-reclaimer-v"), n.hasSuffix(".exe") else { return nil }
+        return String(n.dropFirst(19).dropLast(4))
+    }.max { versionParts($0).lexicographicallyPrecedes(versionParts($1)) }
+}

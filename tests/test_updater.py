@@ -256,12 +256,19 @@ class UpdaterTest(unittest.TestCase):
     def test_a_chosen_version_is_not_updated_away(self):
         (self.home / "game" / "project-reclaimer-v0.9.8.exe").write_bytes(b"old")
         self.run_updater("use", "0.9.11")
-        rc, out = self.run_updater("run")
+        rc, out = self.run_updater("game")
         self.assertEqual(out[-1], "done: using 0.9.11", out)
         self.assertEqual(self.game_files(), ["project-reclaimer-v0.9.8.exe"])  # no game update while chosen
         listing = json.loads(self.run_updater("versions")[1][-1])
         self.assertEqual(listing["chosen"], "0.9.11")
         self.assertTrue(next(v for v in listing["versions"] if v["version"] == "0.9.11")["downloaded"])
+
+    def test_an_older_version_lasts_until_the_app_is_opened_again(self):
+        # friends shouldn't stay stuck on an old version: the launcher's start-up run goes back to the newest
+        self.run_updater("use", "0.9.11")
+        rc, out = self.run_updater("run")
+        self.assertFalse((self.home / "game" / "chosen-version").exists())
+        self.assertIn("project-reclaimer-v0.9.12.exe", self.game_files())
 
     def test_back_to_the_newest(self):
         self.run_updater("use", "0.9.11")

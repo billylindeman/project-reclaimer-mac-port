@@ -53,6 +53,10 @@ APP_ID = "976730"
 FAILED = re.compile(r"^Mod (.+?) not downloaded: .*Workshop")
 FALLBACK = re.compile(r"^Workshop for (.+?) unavailable: .*using the server")
 PROGRESS = re.compile(r"^\s*(\d+(?:\.\d+)?)% ")
+# joins: the address being joined, and why a join failed (the window offers to switch versions and rejoin)
+JOINING = re.compile(r"^Joining ([A-Za-z0-9.-]+:\d+)\b")
+JOIN_VERSION = re.compile(r"This server runs Project Reclaimer ([0-9][0-9.]*[0-9]), (?:older|newer) than your ([0-9][0-9.]*[0-9])")
+JOIN_NO_ANSWER = re.compile(r"Public join timed out|The server did not answer")
 # a small MCC Workshop item: fetching only its manifest is a quick test that the saved login works
 CHECK_ITEM = "2984061723"
 # DepotDownloader output when the saved login is missing (it asks for a password), expired or rejected
@@ -495,6 +499,16 @@ def fetcher(jobs):
             jobs.task_done()
 
 
+def record_join_problem(address, server_version, mine, kind):
+    """logs/join-problem.json: a join that failed, for the window to explain and offer a fix."""
+    log(f"join failed ({kind}): {address} {server_version or ''}")
+    path = BASE / "logs" / "join-problem.json"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"address": address, "server_version": server_version, "mine": mine, "kind": kind,
+                               "time": time.time()}))
+    tmp.replace(path)
+
+
 def game_running():
     # -a: launch.sh starts this helper and then becomes the game, so the game is our parent process, and pgrep
     # leaves out the caller's ancestors unless asked to include them
@@ -516,7 +530,7 @@ def watch():
         write_manifest()  # mods downloaded before the helper wrote Steam's manifest
     except Exception as e:
         log(f"could not update the Workshop manifest: {e}")
-    seen, pos, last_seen = set(), 0, time.time()
+    seen, pos, last_seen, joining = set(), 0, time.time(), None
     jobs = queue.Queue()
     threading.Thread(target=fetcher, args=(jobs,), daemon=True).start()
     # keep going until the game has been gone for 60 s straight: one missed check (or Reclaimer restarting itself
@@ -536,6 +550,14 @@ def watch():
             chunk = b""
         for line in chunk.decode("utf-8", "replace").splitlines():
             line = line.strip()
+            m = JOINING.match(line)
+            if m:
+                joining = m.group(1)
+            m = JOIN_VERSION.search(line)
+            if m or JOIN_NO_ANSWER.search(line):
+                record_join_problem(joining, m.group(1) if m else None, m.group(2) if m else None,
+                                    "version" if m else "no-answer")
+                continue
             m = FAILED.match(line)
             if m and m.group(1) not in seen:
                 seen.add(m.group(1))

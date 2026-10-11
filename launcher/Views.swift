@@ -151,9 +151,9 @@ struct HelpPanel: View {
         ("Mod not downloaded… Start Steam and sign in",
          "Expected on a Mac: the game can't use Steam itself, so this window downloads the mod instead. Wait until it says Ready under Mods, then press Try Again (or leave and rejoin)."),
         ("The server runs an older version of Project Reclaimer",
-         "The server hasn't updated yet; you have the newest version. Pick another server (the server browser's filters can hide servers running another version), or to join this one anyway: Tools > Game version, and pick the version from a day or two ago. Switch back to the newest afterwards."),
+         "The server hasn't updated yet; you have the newest version. This window notices and offers \u{201C}Switch to (its version) and rejoin\u{201D}: one click, and the game restarts on that version and joins. Next time you open Project Reclaimer it's back on the newest."),
         ("Public join timed out; check the server address and forwarded ports",
-         "That server didn't answer the join. Usually it runs an older Project Reclaimer (its card says \u{201C}This server runs an older version\u{201D}) or its port isn't open. Pick another server, or try Tools > Game version with the version from a day or two ago. If every server says this, quit the game and open Project Reclaimer again: it checks your Mac's network setup."),
+         "That server didn't answer the join. Usually it runs an older Project Reclaimer (its card says \u{201C}This server runs an older version\u{201D}) or its port isn't open. This window asks the server which version it runs and offers to switch and rejoin when that's the problem; otherwise pick another server. If every server says this, quit the game and open Project Reclaimer again: it checks your Mac's network setup."),
         ("Steam Workshop's version of a mod differs from the server's",
          "The server uses an older copy of a mod than Steam has. Only the server's owner can fix it by updating the mod. Pick another server."),
         ("Could not join that server (every server)",
@@ -227,6 +227,8 @@ struct ContentView: View {
             .padding(16)
             .background(RoundedRectangle(cornerRadius: 14).fill(.background.secondary))
 
+            if let j = m.joinTrouble { JoinTroubleCard(m: m, j: j) }
+
             if m.playing {
                 Label {
                     // (one literal: SwiftUI only applies the **bold** markup to a string literal)
@@ -299,6 +301,46 @@ struct ContentView: View {
             .controlSize(.large)
             .help("Force quit, repair, mods and disk space, reports, uninstall")
         }
+    }
+}
+
+/// A failed join, said plainly, with the fix: switch to the server's version (or back to the newest) and rejoin.
+struct JoinTroubleCard: View {
+    @ObservedObject var m: Launcher
+    let j: Launcher.JoinTrouble
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Label("Couldn't join \(j.serverName ?? "that server")", systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline).foregroundStyle(.orange)
+                Spacer()
+                Button { m.joinTrouble = nil } label: { Image(systemName: "xmark") }.buttonStyle(.borderless)
+            }
+            Text(explanation).font(.callout).fixedSize(horizontal: false, vertical: true)
+            if let server = j.serverVersion, let mine = j.mine, server != mine, j.address != nil {
+                let target = switchTarget(server: server, mine: mine)
+                Button(target == "newest" ? "Switch to the newest and rejoin" : "Switch to \(server) and rejoin",
+                       action: m.switchAndRejoin)
+                    .buttonStyle(PlayButtonStyle())
+                Text(target == "newest" ? "The game restarts on the newest version and joins the server."
+                     : "The game restarts on that version and joins the server. Next time you open Project Reclaimer it's back on the newest.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if j.asking { HStack { ProgressView().controlSize(.small); Text("Asking the server which version it runs…").font(.caption) } }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.12)))
+    }
+
+    private var explanation: String {
+        if j.asking { return "The server didn't answer the join." }
+        if j.unreachable { return "The server didn't answer at all. It may be offline or blocking new players right now. Pick another server, or try again later." }
+        guard let server = j.serverVersion, let mine = j.mine else { return "The server didn't answer the join." }
+        if server == mine { return "It runs the same Project Reclaimer as you (\(mine)), but didn't answer the join. It may be busy or have a closed port. Try again in a minute, or pick another server." }
+        return versionParts(server).lexicographicallyPrecedes(versionParts(mine))
+            ? "It runs an older Project Reclaimer (\(server)) than you (\(mine)). Both need the same version."
+            : "It runs a newer Project Reclaimer (\(server)) than you (\(mine)). Both need the same version."
     }
 }
 
