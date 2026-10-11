@@ -96,6 +96,7 @@ To put back the tuned defaults, run the install command with `RECLAIMER_RESET_GR
 | "Could not join that server" on every server, especially after a Reclaimer update | A new release may use new local addresses. Quit the game and open Project Reclaimer again: the update installs the fix (it may ask for your Mac password). |
 | Mods won't download / "Start Steam…" | Look at the Project Reclaimer window: if it shows a QR code, scan it with the Steam app. If it says a mod couldn't download, press Try Again in the game. |
 | Game won't start right after a reboot | The window checks the network addresses before Play and fixes them (asks for your Mac password). |
+| "Public join timed out" on one server | That server didn't answer: usually it runs an older Project Reclaimer ("This server runs an older version" on its card) or its port is closed. Pick another server; the server browser's filters can hide servers running another version. If **every** server times out, quit and reopen Project Reclaimer (it checks the network setup). |
 | Stuck on "Synchronizing players" for minutes | Usually the server (its clock is stuck for everyone). Try another server. |
 | "Graphics card stopped responding" | A GPU fault in the DirectX → Metal translation, mostly on heavy modded maps. Relaunch; lower Settings → render resolution if it repeats. |
 | Game frozen and won't close | Tools → **Force Quit**. |

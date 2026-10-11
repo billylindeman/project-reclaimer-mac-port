@@ -152,6 +152,8 @@ struct HelpPanel: View {
          "Expected on a Mac: the game can't use Steam itself, so this window downloads the mod instead. Wait until it says Ready under Mods, then press Try Again (or leave and rejoin)."),
         ("The server runs an older version of Project Reclaimer",
          "The server hasn't updated yet; you have the newest version. Pick another server. In the server browser's filters, turn on Hide servers running another version."),
+        ("Public join timed out; check the server address and forwarded ports",
+         "That server didn't answer the join. Usually it runs an older Project Reclaimer (its card says \u{201C}This server runs an older version\u{201D}) or its port isn't open. Pick another server. If every server says this, quit the game and open Project Reclaimer again: it checks your Mac's network setup."),
         ("Steam Workshop's version of a mod differs from the server's",
          "The server uses an older copy of a mod than Steam has. Only the server's owner can fix it by updating the mod. Pick another server."),
         ("Could not join that server (every server)",
