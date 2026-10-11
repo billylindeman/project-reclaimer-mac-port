@@ -3,6 +3,9 @@
 
   updater.py run    the Mac port (when GitHub has a newer VERSION, re-run its installer in update mode), then the game
   updater.py game   only the game: install the latest Project Reclaimer release if it isn't installed yet
+  updater.py versions        JSON: recent Project Reclaimer releases, which are downloaded, and the chosen one
+  updater.py use <version>   play an older release (for servers that haven't updated yet): download and verify it
+                             into game/versions/, and pause game updates; "use newest" goes back to the latest
 
 Project Reclaimer's own in-game updater is turned off (run.sh sets RECLAIMER_UPDATE_URL=off): it overwrites its exe
 in place and restarts itself outside the launcher. This installs each release as its own checksum-verified file
@@ -14,8 +17,10 @@ updates never stop the game from starting.
 """
 import fcntl
 import hashlib
+import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +34,13 @@ REPO_RAW = os.environ.get("RECLAIMER_REPO_RAW", f"https://raw.githubusercontent.
 RELEASES = os.environ.get("RECLAIMER_RELEASES",
                           "https://github.com/ProjectReclaimer/project-reclaimer-releases/releases/latest/download")
 GAME = BASE / "game"
+VERSIONS = GAME / "versions"          # older releases a player chose, each kept for switching back and forth
+CHOSEN = GAME / "chosen-version"      # the older release to start instead of the newest (run.sh reads it)
+RELEASES_API = os.environ.get("RECLAIMER_RELEASES_API", "https://api.github.com/repos/ProjectReclaimer/"
+                              "project-reclaimer-releases/releases?per_page=12")
+RELEASE_DOWNLOADS = os.environ.get("RECLAIMER_RELEASE_DOWNLOADS", "https://github.com/ProjectReclaimer/"
+                                   "project-reclaimer-releases/releases/download")
+MENU_DLLS = ("opengl32.dll", "libgallium_wgl.dll")  # Mesa, loaded from the exe's own folder
 CLIENT_EXE = re.compile(r"^project-reclaimer-v[0-9.]+\.exe$")
 # the running game itself (as workshop_helper.py matches it), not any command that merely names the file
 GAME_PROCESS = os.environ.get("RECLAIMER_GAME_PROCESS", r"project-reclaimer-v[0-9.]+\.exe game-client")  # (tests)
@@ -124,33 +136,28 @@ def update_port():
     return "updated"
 
 
-def latest_release():
-    sums = fetch(f"{RELEASES}/SHA256SUMS.txt").decode().replace("\r", "")
+def client_in(sums_url):
+    """(exe name, sha256) of the game client listed in a release's SHA256SUMS.txt."""
+    sums = fetch(sums_url).decode().replace("\r", "")
     for line in sums.splitlines():
         parts = line.split()
         if len(parts) == 2:
             name = parts[1].lstrip("*")
             if CLIENT_EXE.match(name):
                 return name, parts[0].lower()
-    raise RuntimeError("the latest Project Reclaimer release has no game client")
+    raise RuntimeError("that Project Reclaimer release has no game client")
 
 
-def update_game():
-    """Returns "current", "updated" or "running" (left alone while the game runs), or raises."""
-    exe, expected = latest_release()
-    target = GAME / exe
-    if target.exists() and sha256(target) == expected:
-        remove_other_clients(exe)
-        return "current"
-    if game_running():
-        return "running"
-    version = re.search(r"v([0-9.]+)\.exe$", exe).group(1)
-    say(f"status: Updating Project Reclaimer to {version}…")
+def latest_release():
+    return client_in(f"{RELEASES}/SHA256SUMS.txt")
+
+
+def download_verified(url, target, expected):
+    """Download to target with progress lines, keeping it only if its SHA-256 matches."""
     part = target.with_name(target.name + ".part")
     try:
-        req = urllib.request.Request(f"{RELEASES}/{exe}", headers=UA)
         try:
-            r = urllib.request.urlopen(req, timeout=30)
+            r = urllib.request.urlopen(urllib.request.Request(url, headers=UA), timeout=30)
         except (urllib.error.URLError, OSError) as e:
             raise Offline(str(getattr(e, "reason", e))) from e
         with r, open(part, "wb") as f:
@@ -168,8 +175,65 @@ def update_game():
         part.replace(target)
     finally:
         part.unlink(missing_ok=True)
+
+
+def update_game():
+    """Returns "current", "updated", "running" (left alone while the game runs) or "chosen" (the player picked an
+    older release), or raises."""
+    if CHOSEN.exists():
+        return "chosen"
+    exe, expected = latest_release()
+    target = GAME / exe
+    if target.exists() and sha256(target) == expected:
+        remove_other_clients(exe)
+        return "current"
+    if game_running():
+        return "running"
+    version = re.search(r"v([0-9.]+)\.exe$", exe).group(1)
+    say(f"status: Updating Project Reclaimer to {version}…")
+    download_verified(f"{RELEASES}/{exe}", target, expected)
     remove_other_clients(exe)
     return "updated"
+
+
+def versions():
+    """Recent releases for the window's version list (prereleases left out)."""
+    try:
+        listing = json.loads(fetch(RELEASES_API).decode())
+    except ValueError as e:
+        raise RuntimeError("the list of Project Reclaimer releases couldn't be read") from e
+    chosen = CHOSEN.read_text().strip() if CHOSEN.exists() else None
+    items = []
+    for r in listing:
+        if r.get("prerelease") or r.get("draft"):
+            continue
+        version = str(r.get("tag_name", "")).lstrip("v")
+        if not re.fullmatch(r"\d+(\.\d+){1,3}", version):
+            continue
+        exe = f"project-reclaimer-v{version}.exe"
+        items.append({"version": version, "date": str(r.get("published_at", ""))[:10],
+                      "downloaded": (VERSIONS / exe).exists() or (GAME / exe).exists()})
+    return json.dumps({"chosen": chosen, "versions": items})
+
+
+def use(version):
+    """Choose the release to play: an older one (downloaded once, then kept), or "newest"."""
+    if version == "newest":
+        CHOSEN.unlink(missing_ok=True)
+        return update_game()
+    if not re.fullmatch(r"\d+(\.\d+){1,3}", version):
+        raise RuntimeError(f"{version} isn't a Project Reclaimer version")
+    exe, expected = client_in(f"{RELEASE_DOWNLOADS}/v{version}/SHA256SUMS.txt")
+    VERSIONS.mkdir(parents=True, exist_ok=True)
+    target = VERSIONS / exe
+    if not (target.exists() and sha256(target) == expected):
+        say(f"status: Downloading Project Reclaimer {version}…")
+        download_verified(f"{RELEASE_DOWNLOADS}/v{version}/{exe}", target, expected)
+    for dll in MENU_DLLS:  # the menu's graphics library, next to this exe too
+        if (GAME / dll).exists() and not (VERSIONS / dll).exists():
+            shutil.copy2(GAME / dll, VERSIONS / dll)
+    CHOSEN.write_text(version + "\n")
+    return "chosen"
 
 
 def remove_other_clients(exe):
@@ -180,6 +244,30 @@ def remove_other_clients(exe):
 
 
 def main(argv):
+    if len(argv) == 2 and argv[1] == "versions":
+        try:
+            say(versions())
+            return 0
+        except Offline as e:
+            say(f"offline: {e}")
+            return 1
+        except Exception as e:
+            say(f"error: {e}")
+            return 1
+    if len(argv) == 3 and argv[1] == "use":
+        try:
+            result = use(argv[2])
+        except Offline as e:
+            say(f"error: Couldn't download it ({e}). Check your internet connection and try again.")
+            return 1
+        except Exception as e:
+            say(f"error: {e}")
+            return 1
+        if result == "chosen":
+            say(f"done: using {argv[2]}")
+        else:
+            say("done: updated" if result == "updated" else "done: up to date")
+        return 0
     if len(argv) != 2 or argv[1] not in ("run", "game"):
         print(__doc__)
         return 2
@@ -213,7 +301,9 @@ def main(argv):
     if offline and "updated" not in results:  # (checks that could connect found nothing to do)
         say(f"offline: {offline}")
         return 0
-    if "updated" in results:
+    if "chosen" in results:
+        say(f"done: using {CHOSEN.read_text().strip()}")
+    elif "updated" in results:
         say("done: updated")
     elif "running" in results:
         say("done: skipped while the game is running")

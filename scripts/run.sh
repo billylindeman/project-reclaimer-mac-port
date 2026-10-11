@@ -30,6 +30,14 @@ export MVK_CONFIG_LOG_LEVEL=1
 [ -n "$RECLAIMER_NO_AUDIO" ] && WINEDLLOVERRIDES="$WINEDLLOVERRIDES;winecoreaudio.drv=d"  # troubleshooting only
 
 cd "$BASE/game" || exit 1
-EXE=$(ls project-reclaimer-v*.exe 2>/dev/null | grep -v dedicated | sort -V | tail -1)
+# an older release the player chose for servers that haven't updated (Tools > Game version), started from its own
+# folder, where its copy of the menu's graphics library sits; otherwise the newest
+CHOSEN=$(cat chosen-version 2>/dev/null)
+if [ -n "$CHOSEN" ] && [ -f "versions/project-reclaimer-v$CHOSEN.exe" ]; then
+  cd versions
+  EXE="project-reclaimer-v$CHOSEN.exe"
+else
+  EXE=$(ls project-reclaimer-v*.exe 2>/dev/null | grep -v dedicated | sort -V | tail -1)
+fi
 [ -n "$EXE" ] || { echo "Project Reclaimer is not installed in $BASE/game" >&2; exit 1; }
 exec "$WINE" "$EXE" "${@:-game-client}" --mcc-path "$MCC"

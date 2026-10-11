@@ -81,6 +81,11 @@ files against Steam, see **Mods and disk space** and remove mods, **Restore** th
 **Switch** Steam accounts, **Make Report** (a zip of the logs on your Desktop, without your Steam account name), and
 **Uninstall**.
 
+**A server on an older Project Reclaimer?** Releases come out about twice a day, and a server only a day behind can't
+be joined with the newest version. Tools → **Game version** → **Play an older version** lists recent releases ("0.9.12 ·
+today", "0.9.11 · yesterday"): pick the one from a day or two ago. It downloads once (~36 MB, checksum-verified) and is
+kept; game updates pause while it's chosen, and **Back to the newest version** switches back for up-to-date servers.
+
 Why mods need Steam: without the Steam client, the game downloads mods from the game servers, which cap sharing at
 ~2.5 MB/s each, or shows a "Start Steam…" error for Workshop-only mods. A helper next to the game fetches the same
 mods from Steam's CDN instead (~40 MB/s measured: 1.6 GB in 37 s). Mods are 1–9 GB each. To get a mod before

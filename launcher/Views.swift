@@ -151,9 +151,9 @@ struct HelpPanel: View {
         ("Mod not downloaded… Start Steam and sign in",
          "Expected on a Mac: the game can't use Steam itself, so this window downloads the mod instead. Wait until it says Ready under Mods, then press Try Again (or leave and rejoin)."),
         ("The server runs an older version of Project Reclaimer",
-         "The server hasn't updated yet; you have the newest version. Pick another server. In the server browser's filters, turn on Hide servers running another version."),
+         "The server hasn't updated yet; you have the newest version. Pick another server (the server browser's filters can hide servers running another version), or to join this one anyway: Tools > Game version, and pick the version from a day or two ago. Switch back to the newest afterwards."),
         ("Public join timed out; check the server address and forwarded ports",
-         "That server didn't answer the join. Usually it runs an older Project Reclaimer (its card says \u{201C}This server runs an older version\u{201D}) or its port isn't open. Pick another server. If every server says this, quit the game and open Project Reclaimer again: it checks your Mac's network setup."),
+         "That server didn't answer the join. Usually it runs an older Project Reclaimer (its card says \u{201C}This server runs an older version\u{201D}) or its port isn't open. Pick another server, or try Tools > Game version with the version from a day or two ago. If every server says this, quit the game and open Project Reclaimer again: it checks your Mac's network setup."),
         ("Steam Workshop's version of a mod differs from the server's",
          "The server uses an older copy of a mod than Steam has. Only the server's owner can fix it by updating the mod. Pick another server."),
         ("Could not join that server (every server)",
@@ -203,6 +203,10 @@ struct ContentView: View {
             header
             VStack(alignment: .leading, spacing: 14) {
                 StepRow(title: "Updates", step: m.update, progress: m.updateProgress)
+                if m.chosenVersion != nil, !m.playing, m.update.finished {
+                    Button("Back to the newest version") { m.useVersion("newest") { _ in } }
+                        .padding(.leading, 34)
+                }
                 Divider()
                 StepRow(title: "Steam (for Workshop mods)", step: m.steam)
                 if let network = m.network {

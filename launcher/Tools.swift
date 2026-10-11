@@ -18,6 +18,8 @@ final class ToolsModel: ObservableObject {
     @Published var repairProgress: Double?
     @Published var repairRemaining: String?
     @Published var repairQR: QRGrid?
+    @Published var versions: GameVersions?
+    @Published var showVersions = false
     private var running: LineProcess?
 
     /// Run a tools.py command; `done` gets its last line.
@@ -55,6 +57,21 @@ final class ToolsModel: ObservableObject {
     func say(_ text: String, ok: Bool = true) { result = (text, ok) }
 
     func error(in line: String) -> String? { line.hasPrefix("error: ") ? String(line.dropFirst(7)) : nil }
+
+    func loadVersions() {
+        busy = "Looking up Project Reclaimer versions…"
+        var listing: GameVersions?
+        var problem: String?
+        running = python("updater.py", ["versions"], onLine: { line in
+            if let data = line.data(using: .utf8), let v = try? JSONDecoder().decode(GameVersions.self, from: data) { listing = v }
+            if line.hasPrefix("offline: ") || line.hasPrefix("error: ") { problem = line }
+        }, onExit: { [self] _ in
+            busy = nil
+            running = nil
+            versions = listing
+            if listing == nil { say(problem == nil ? "The list of versions couldn't be loaded." : "Couldn't reach GitHub to list the versions. Check your internet connection.", ok: false) }
+        })
+    }
 
     func loadMods() {
         run("Looking at your mods…", ["mods"]) { [self] line in
@@ -156,6 +173,60 @@ struct ToolsSheet: View {
                             ProgressView(value: p).tint(accent)
                             Text("\(Int(p * 100))%" + (t.repairRemaining.map { " · \($0)" } ?? ""))
                                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                        }
+                    }
+                    section("Game version") {
+                        Text(launcher.chosenVersion.map { "Playing Project Reclaimer \($0), an older version. Up-to-date servers need the newest." }
+                             ?? "Playing the newest Project Reclaimer. A server that hasn't updated yet needs the version it runs.")
+                            .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        if launcher.chosenVersion != nil {
+                            tool("Back to the newest version", "Switch Back",
+                                 "For up-to-date servers (most of them). Takes effect the next time you press Play.") {
+                                t.busy = "Switching back…"
+                                launcher.useVersion("newest") { e in
+                                    t.busy = nil
+                                    if let e { t.say(e, ok: false) } else { t.say("Back on the newest version."); t.loadVersions() }
+                                }
+                            }
+                        }
+                        tool("Play an older version", t.showVersions ? "Hide" : "Choose…",
+                             "For a server that says it runs an older version. Try the version from a day or two ago; each is a ~36 MB download the first time.") {
+                            t.showVersions.toggle()
+                            if t.showVersions, t.versions == nil { t.loadVersions() }
+                        }
+                        if t.showVersions, let list = t.versions {
+                            ForEach(list.versions) { r in
+                                HStack {
+                                    Text(r.version).font(.callout.monospacedDigit().weight(.medium))
+                                    Text(relativeDay(r.date)).font(.callout).foregroundStyle(.secondary)
+                                    if r.version == list.versions.first?.version { Text("newest").font(.caption.weight(.semibold)) }
+                                    if r.downloaded { Text("downloaded").font(.caption).foregroundStyle(.secondary) }
+                                    Spacer()
+                                    if r.version == (list.chosen ?? list.versions.first?.version) {
+                                        Text(list.chosen == nil ? "Newest, in use" : "In use").font(.caption.weight(.semibold)).foregroundStyle(accent)
+                                    } else if r.version == list.versions.first?.version {
+                                        Button("Use") {
+                                            t.busy = "Switching back…"
+                                            launcher.useVersion("newest") { e in
+                                                t.busy = nil
+                                                if let e { t.say(e, ok: false) } else { t.say("Back on the newest version."); t.loadVersions() }
+                                            }
+                                        }.disabled(t.busy != nil || launcher.playing)
+                                    } else {
+                                        Button("Use") {
+                                            t.busy = "Getting Project Reclaimer \(r.version)…"
+                                            launcher.useVersion(r.version) { e in
+                                                t.busy = nil
+                                                if let e { t.say(e, ok: false) }
+                                                else { t.say("Project Reclaimer \(r.version) starts the next time you press Play."); t.loadVersions() }
+                                            }
+                                        }.disabled(t.busy != nil || launcher.playing)
+                                    }
+                                }
+                            }
+                            if launcher.playing {
+                                Text("Quit the game to switch versions.").font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                     section("Mods and disk space") {

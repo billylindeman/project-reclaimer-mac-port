@@ -3,6 +3,7 @@
 Run: /usr/bin/python3 -I -m unittest discover -s tests
 """
 import hashlib
+import json
 import importlib.util
 import os
 import shutil
@@ -16,6 +17,7 @@ from unittest import mock
 REPO = Path(__file__).resolve().parent.parent
 UPDATER = REPO / "scripts" / "updater.py"
 NEW_EXE = b"MZ new reclaimer 0.9.12"
+OLD_EXE = b"MZ older reclaimer 0.9.11"
 
 FAKE_INSTALL = """#!/bin/bash
 # stand-in for install.sh: records how it was called, then behaves like a successful update
@@ -56,8 +58,22 @@ class UpdaterTest(unittest.TestCase):
             f"{sha(b'ded')}  project-reclaimer-dedicated-v0.9.12.exe\r\n"
             f"{sha(NEW_EXE)} *project-reclaimer-v0.9.12.exe\r\n")
         # a game version no real install has, so a game running on this Mac doesn't affect the tests
+        # an older release, where GitHub keeps it: releases/download/<tag>/
+        self.tags = self.tmp / "tags"
+        (self.tags / "v0.9.11").mkdir(parents=True)
+        (self.tags / "v0.9.11" / "project-reclaimer-v0.9.11.exe").write_bytes(OLD_EXE)
+        (self.tags / "v0.9.11" / "SHA256SUMS.txt").write_text(f"{sha(OLD_EXE)}  project-reclaimer-v0.9.11.exe\n")
+        (self.home / "game" / "opengl32.dll").write_bytes(b"mesa")
+        (self.home / "game" / "libgallium_wgl.dll").write_bytes(b"gallium")
+        listing = self.tmp / "releases.json"
+        listing.write_text(json.dumps([
+            {"tag_name": "v0.9.12", "published_at": "2026-10-10T13:20:51Z", "prerelease": False, "draft": False},
+            {"tag_name": "v0.9.11", "published_at": "2026-10-09T22:35:00Z", "prerelease": False, "draft": False},
+            {"tag_name": "v0.9.11-rc1", "published_at": "2026-10-09T20:00:00Z", "prerelease": True, "draft": False},
+        ]))
         self.env = dict(os.environ, RECLAIMER_HOME=str(self.home), RECLAIMER_REPO_RAW=self.raw.as_uri(),
-                        RECLAIMER_RELEASES=self.rel.as_uri(),
+                        RECLAIMER_RELEASES=self.rel.as_uri(), RECLAIMER_RELEASES_API=listing.as_uri(),
+                        RECLAIMER_RELEASE_DOWNLOADS=self.tags.as_uri(),
                         RECLAIMER_GAME_PROCESS=r"project-reclaimer-v9\.9\.(98|99)\.exe game-client")
 
     def tearDown(self):
@@ -215,6 +231,55 @@ class UpdaterTest(unittest.TestCase):
             game.kill()
         self.assertEqual(out[-1], "done: skipped while the game is running")
         self.assertEqual(self.game_files(), ["project-reclaimer-v0.9.8.exe"])
+
+    # ---- choosing an older version (servers that haven't updated yet) ------------------------------------------
+    def test_versions_lists_recent_releases_without_prereleases(self):
+        (self.home / "game" / "project-reclaimer-v0.9.12.exe").write_bytes(NEW_EXE)
+        rc, out = self.run_updater("versions")
+        listing = json.loads(out[-1])
+        self.assertEqual([v["version"] for v in listing["versions"]], ["0.9.12", "0.9.11"])
+        self.assertEqual(listing["chosen"], None)
+        self.assertEqual(listing["versions"][0]["date"], "2026-10-10")
+
+    def test_use_an_older_version_downloads_verifies_and_pins_it(self):
+        (self.home / "game" / "project-reclaimer-v0.9.12.exe").write_bytes(NEW_EXE)
+        rc, out = self.run_updater("use", "0.9.11")
+        self.assertEqual(out[-1], "done: using 0.9.11", out)
+        versions = self.home / "game" / "versions"
+        self.assertEqual((versions / "project-reclaimer-v0.9.11.exe").read_bytes(), OLD_EXE)
+        # the menu's graphics library loads from the exe's own folder
+        self.assertEqual((versions / "opengl32.dll").read_bytes(), b"mesa")
+        self.assertTrue((versions / "libgallium_wgl.dll").exists())
+        self.assertEqual((self.home / "game" / "chosen-version").read_text().strip(), "0.9.11")
+        self.assertIn("project-reclaimer-v0.9.12.exe", self.game_files())  # the newest stays for later
+
+    def test_a_chosen_version_is_not_updated_away(self):
+        (self.home / "game" / "project-reclaimer-v0.9.8.exe").write_bytes(b"old")
+        self.run_updater("use", "0.9.11")
+        rc, out = self.run_updater("run")
+        self.assertEqual(out[-1], "done: using 0.9.11", out)
+        self.assertEqual(self.game_files(), ["project-reclaimer-v0.9.8.exe"])  # no game update while chosen
+        listing = json.loads(self.run_updater("versions")[1][-1])
+        self.assertEqual(listing["chosen"], "0.9.11")
+        self.assertTrue(next(v for v in listing["versions"] if v["version"] == "0.9.11")["downloaded"])
+
+    def test_back_to_the_newest(self):
+        self.run_updater("use", "0.9.11")
+        rc, out = self.run_updater("use", "newest")
+        self.assertFalse((self.home / "game" / "chosen-version").exists())
+        self.assertIn("project-reclaimer-v0.9.12.exe", self.game_files())  # installed right away
+        self.assertEqual(out[-1], "done: updated")
+
+    def test_damaged_older_download_is_refused(self):
+        (self.tags / "v0.9.11" / "project-reclaimer-v0.9.11.exe").write_bytes(b"tampered")
+        rc, out = self.run_updater("use", "0.9.11")
+        self.assertTrue(out[-1].startswith("error: "), out)
+        self.assertFalse((self.home / "game" / "chosen-version").exists())
+        self.assertFalse((self.home / "game" / "versions" / "project-reclaimer-v0.9.11.exe").exists())
+
+    def test_use_rejects_odd_versions(self):
+        rc, out = self.run_updater("use", "../../x")
+        self.assertTrue(out[-1].startswith("error: "))
 
     def test_game_running_skips_game_update(self):
         (self.home / "game" / "project-reclaimer-v0.9.8.exe").write_bytes(b"old")

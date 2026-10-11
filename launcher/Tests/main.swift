@@ -133,5 +133,14 @@ var est2 = RateEstimator()
 _ = est2.remaining(fraction: 0, now: t0)
 check(est2.remaining(fraction: 0.01, now: t0.addingTimeInterval(60)) == "About 2 hours left", "hours")
 
+// release dates
+let noon = ISO8601DateFormatter().date(from: "2026-10-10T12:00:00Z")!
+check(relativeDay("2026-10-10", now: noon) == "today", "today")
+check(relativeDay("2026-10-09", now: noon) == "yesterday", "yesterday")
+check(relativeDay("2026-10-06", now: noon) == "4 days ago", "days ago")
+check(relativeDay("soon", now: noon) == "soon", "unparseable stays as it is")
+let listing = #"{"chosen": "0.9.11", "versions": [{"version": "0.9.12", "date": "2026-10-10", "downloaded": true}]}"#
+check((try? JSONDecoder().decode(GameVersions.self, from: Data(listing.utf8)))?.chosen == "0.9.11", "versions json")
+
 print(failures == 0 ? "All launcher tests passed" : "\(failures) launcher test(s) failed")
 exit(failures == 0 ? 0 : 1)

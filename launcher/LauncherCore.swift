@@ -214,3 +214,32 @@ struct RateEstimator {
         }
     }
 }
+
+// MARK: - game versions
+
+/// "today", "yesterday", "3 days ago" for a release date like "2026-10-09" (UTC, as GitHub gives it).
+func relativeDay(_ day: String, now: Date = Date()) -> String {
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd"
+    f.timeZone = TimeZone(identifier: "UTC")
+    guard let date = f.date(from: day) else { return day }
+    let today = f.date(from: f.string(from: now)) ?? now
+    let days = Int((today.timeIntervalSince(date) / 86400).rounded())
+    switch days {
+    case ..<1: return "today"
+    case 1: return "yesterday"
+    default: return "\(days) days ago"
+    }
+}
+
+/// updater.py versions
+struct GameVersions: Decodable, Equatable {
+    struct Release: Decodable, Equatable, Identifiable {
+        let version: String
+        let date: String
+        let downloaded: Bool
+        var id: String { version }
+    }
+    let chosen: String?
+    let versions: [Release]
+}

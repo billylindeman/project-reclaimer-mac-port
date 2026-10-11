@@ -325,6 +325,23 @@ func renderStates(to dir: URL) {
                     ModItem(id: "3", title: "Halo 3 Foundation", bytes: 337_000_000)]
     m.tools.say("The report is on your Desktop: Project Reclaimer report 2026-10-10 12.31.zip")
     snapshot(ToolsSheet(launcher: m, t: m.tools), name: "30-tools", to: dir)
+
+    // an older version chosen: the main window, and Tools with the version list open
+    let v = Launcher()
+    v.logging = false
+    v.update = .done("Playing an older Project Reclaimer (0.9.11) for servers that haven't updated yet")
+    v.steam = .done("Signed in as player123")
+    v.chosenVersion = "0.9.11"
+    snapshot(ContentView(m: v), name: "31-older-version", to: dir)
+    v.tools.showVersions = true
+    let today = ISO8601DateFormatter().string(from: Date()).prefix(10)
+    let yesterday = ISO8601DateFormatter().string(from: Date().addingTimeInterval(-86400)).prefix(10)
+    v.tools.versions = GameVersions(chosen: "0.9.11", versions: [
+        .init(version: "0.9.13", date: String(today), downloaded: true),
+        .init(version: "0.9.12", date: String(today), downloaded: true),
+        .init(version: "0.9.11", date: String(yesterday), downloaded: true),
+        .init(version: "0.9.10", date: String(yesterday), downloaded: false)])
+    snapshot(ToolsSheet(launcher: v, t: v.tools), name: "32-tools-versions", to: dir)
 }
 
 @MainActor

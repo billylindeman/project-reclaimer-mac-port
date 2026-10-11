@@ -35,6 +35,8 @@ final class Launcher: ObservableObject {
     @Published var network: Step? { didSet { if network != oldValue, let n = network { log("network: \(n)") } } }
     @Published var notice: String?   // a plain-language note, e.g. after Tools stopped the game
     @Published var showTools = false
+    /// An older Project Reclaimer the player chose for servers that haven't updated (nil: the newest).
+    @Published var chosenVersion: String? { didSet { if chosenVersion != oldValue { log("chosen version: \(chosenVersion ?? "newest")") } } }
     let tools = ToolsModel()
     private var checkingCrash = false
 
@@ -138,7 +140,11 @@ final class Launcher: ObservableObject {
             case .status(let s): update = .working(s); updateProgress = nil
             case .progress(let v): updateProgress = v
             case .relaunch: relaunchRequested = true
+            case .done(let s) where s.hasPrefix("using "):
+                chosenVersion = String(s.dropFirst(6))
+                update = .done("Playing an older Project Reclaimer (\(chosenVersion!)) for servers that haven't updated yet")
             case .done(let s):
+                chosenVersion = nil
                 update = .done(s == "updated" ? "Updated to the latest version"
                                : s == "up to date" ? "Up to date" : s.prefix(1).uppercased() + s.dropFirst())
             case .offline: update = .warning("Couldn't check for updates right now. You can still play.")
@@ -286,6 +292,32 @@ final class Launcher: ObservableObject {
     }
 
     /// The game ended within seconds of Play: say so and let the player try again, instead of quietly closing.
+    /// Tools > Game version picked a release ("newest" for the latest): the next Play starts it.
+    func useVersion(_ version: String, progress: ((Double) -> Void)? = nil, done: @escaping (String?) -> Void) {
+        let previous = update
+        update = .working(version == "newest" ? "Going back to the newest Project Reclaimer…"
+                                              : "Getting Project Reclaimer \(version)…")
+        var error: String?
+        keep(python("updater.py", ["use", version], onLine: { [self] line in
+            switch UpdaterEvent(line: line) {
+            case .progress(let v): updateProgress = v; progress?(v)
+            case .done(let s) where s.hasPrefix("using "):
+                chosenVersion = String(s.dropFirst(6))
+                update = .done("Playing an older Project Reclaimer (\(chosenVersion!)) for servers that haven't updated yet")
+            case .done:
+                chosenVersion = nil
+                update = .done("Back on the newest version")
+            case .error(let e), .offline(let e):
+                error = e
+            default: break
+            }
+        }, onExit: { [self] _ in
+            updateProgress = nil
+            if error != nil { update = previous }
+            done(error)
+        }))
+    }
+
     /// Called by Tools > Force quit: the window stays, ready to Play again.
     func gameForceQuit() {
         playing = false
